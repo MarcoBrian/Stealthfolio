@@ -22,6 +22,14 @@ Funds remain in a separate vault; the hook never holds assets.
 - large external swaps can be capped or blocked
 - Tracks rebalance progress
 
+## High Level Architecture
+
+![HighLevel](./assets/HighLevel.png)
+
+## Sequence Diagram
+![SequenceDiagram](./assets/SequenceDiagramv1.png)
+
+
 ## Part 2 Stealthfolio - Fully Private, FHE-Powered Rebalancing Hook
 Part 2 keeps the exact same architecture but makes the strategy private.
 All strategy parameters, computations, and decisions are encrypted using Fully Homomorphic Encryption (FHE).
