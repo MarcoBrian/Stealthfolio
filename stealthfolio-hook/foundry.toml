@@ -10,6 +10,12 @@ allow_paths = ["src", "lib"]
  
 solc_version = '0.8.26'
 evm_version = "cancun"
-optimizer_runs = 800
+optimizer = true
+optimizer_runs = 200
 via_ir = true
 ffi = true
+
+
+[profile.default.optimizer_details]
+# Enable Yul optimizer with stack optimization
+yul = true

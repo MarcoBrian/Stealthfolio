@@ -260,51 +260,53 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
         }
     }
     // ========= Hook: beforeSwap (drift guard) =========
-function _beforeSwap(
+
+    /**
+     * @notice Checks if rebalance window has expired and clears state if so.
+     */
+    function _checkAndClearExpiredRebalance() internal {
+        RebalanceState storage st = rebalanceState;
+        uint32 maxDuration = hookConfig.rebalanceMaxDuration;
+        
+        if (
+            st.rebalancePending &&
+            maxDuration > 0 &&
+            block.number > st.nextBatchBlock + maxDuration
+        ) {
+            st.rebalancePending = false;
+            st.batchesRemaining = 0;
+            st.targetAsset = Currency.wrap(address(0));
+            st.nextBatchBlock = 0;
+        }
+    }
+
+    function _beforeSwap(
         address sender,
         PoolKey calldata key,
         SwapParams calldata params,
         bytes calldata
     ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
-        PoolId poolId = key.toId();
-
-        if (!isStrategyPool[poolId]) {
+        if (!isStrategyPool[key.toId()]) {
             return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
 
-        HookConfig memory cfg = hookConfig;
         RebalanceState storage st = rebalanceState;
+        _checkAndClearExpiredRebalance();
 
-        // If there is a pending rebalance, enforce guardrails
-        if (st.rebalancePending) {
-            // Auto-expire rebalance window to avoid DoS
-            if (
-                cfg.rebalanceMaxDuration > 0 &&
-                block.number > st.nextBatchBlock + cfg.rebalanceMaxDuration
-            ) {
-                // Clear stale state and allow swaps normally
-                st.rebalancePending = false;
-                st.batchesRemaining = 0;
-                st.targetAsset = Currency.wrap(address(0));
-                st.nextBatchBlock = 0;
-                return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-            }
-
-            // Vault swaps are always allowed
-            if (sender == cfg.vault) {
-                return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
-            }
-
-            // For external traders, limit max order size during rebalance
-            uint256 absAmount = params.amountSpecified > 0
-                ? uint256(params.amountSpecified)
-                : uint256(-params.amountSpecified);
-
-            require(
-                absAmount <= cfg.maxExternalSwapAmount,
-                "REBAL_PROTECTED"
-            );
+        if (!st.rebalancePending) {
+            return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
+
+        // Vault swaps are always allowed
+        if (sender == hookConfig.vault) {
+            return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
+        }
+
+        // For external traders, limit max order size during rebalance
+        uint256 absAmount = params.amountSpecified > 0
+            ? uint256(params.amountSpecified)
+            : uint256(-params.amountSpecified);
+        require(absAmount <= hookConfig.maxExternalSwapAmount, "REBAL_PROTECTED");
 
         return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
