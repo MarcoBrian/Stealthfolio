@@ -2,8 +2,10 @@
 pragma solidity 0.8.26;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
 
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
@@ -11,11 +13,14 @@ import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
+import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 
 import {MockV3Aggregator} from "@chainlink/local/src/data-feeds/MockV3Aggregator.sol";
 import {StealthfolioHook} from "./hooks/StealthfolioHook.sol";
 
-contract StealthfolioVault is Ownable {
+// import "forge-std/console.sol";
+
+contract StealthfolioVault is Ownable , IUnlockCallback {
     IPoolManager public immutable manager;
     StealthfolioHook public immutable hook;
 
@@ -34,6 +39,14 @@ contract StealthfolioVault is Ownable {
         uint32 lastDriftCheckBlock; // last time drift was computed
         Currency targetAsset;
     }
+
+
+    struct RebalanceExecData {
+        PoolKey poolKey;
+        bool zeroForOne;
+        uint256 amountSpecified;
+    }
+
 
     StrategyConfig public strategyConfig;
     StrategyState public strategyState;
@@ -156,6 +169,27 @@ contract StealthfolioVault is Ownable {
         uint256 amountSpecified;
     }
 
+    /// @dev Normalizes a token balance to 1e18 units using the token's decimals.
+    function _normalizeBalance(address token, uint256 bal)
+        internal
+        view
+        returns (uint256 normalizedBal)
+    {
+        uint8 tokenDecimals = IERC20Metadata(token).decimals();
+
+        if (tokenDecimals == 18) {
+            return bal;
+        }
+
+        if (tokenDecimals > 18) {
+            uint256 factor = 10 ** (tokenDecimals - 18);
+            normalizedBal = bal / factor;
+        } else {
+            uint256 factor = 10 ** (18 - tokenDecimals);
+            normalizedBal = bal * factor;
+        }
+    }
+
     function _abs(int256 x) internal pure returns (uint256) {
         return uint256(x >= 0 ? x : -x);
     }
@@ -186,7 +220,9 @@ contract StealthfolioVault is Ownable {
 
         address token = Currency.unwrap(asset);
         uint256 bal = IERC20(token).balanceOf(address(this));
-        value = (bal * price) / 1e18;
+
+        // value is now in base-asset terms, 1e18 scaled
+        value = (_normalizeBalance(token, bal) * price) / 1e18;
     }
 
     /**
@@ -248,7 +284,7 @@ contract StealthfolioVault is Ownable {
 
             address token = Currency.unwrap(a);
             uint256 bal = IERC20(token).balanceOf(address(this));
-            uint256 v = (bal * price) / 1e18;
+            uint256 v = (_normalizeBalance(token, bal) * price) / 1e18;
             totalValue += v;
             if (a == targetAsset) {
                 assetValue = v;
@@ -333,6 +369,14 @@ contract StealthfolioVault is Ownable {
         }
     }
 
+    function _valueToTokenAmount(
+        uint256 valueInBase1e18,   // e.g. batchValue
+        uint256 priceInBase1e18,   // lastPriceInBase[token]
+        uint8 tokenDecimals        // ERC20 decimals
+    ) internal pure returns (uint256) {
+        return (valueInBase1e18 * (10 ** tokenDecimals)) / priceInBase1e18;
+    }
+
     /**
      * @notice Computes the next batch swap using cached prices.
      */
@@ -369,9 +413,30 @@ contract StealthfolioVault is Ownable {
             batchValue = absDev;
         }
 
-        // convert value in base terms into asset amount using last price
-        params.amountSpecified = (batchValue * 1e18) / priceAsset;
         params.zeroForOne = _computeSwapDirection(asset, params.poolKey, dev);
+        if (dev > 0) {
+            // asset underweight → we BUY asset with base
+            // batchValue is already in base-value units → use it directly as base tokenIn amount
+             uint256 priceBase = lastPriceInBase[baseAsset]; // probably 1e18
+            uint8 baseDecimals = IERC20Metadata(Currency.unwrap(baseAsset)).decimals();
+
+            params.amountSpecified = _valueToTokenAmount(
+                batchValue,
+                priceBase,
+                baseDecimals
+            );
+
+        } else {
+            // dev < 0 → asset overweight → we SELL asset for base
+            // need to convert target base-value batchValue into asset quantity
+            uint8 assetDecimals = IERC20Metadata(Currency.unwrap(asset)).decimals();
+
+            params.amountSpecified = _valueToTokenAmount(
+                batchValue,
+                priceAsset,
+                assetDecimals
+            );
+        }
     }
 
     // ======================
@@ -388,12 +453,20 @@ contract StealthfolioVault is Ownable {
      */
     function rebalanceStep() external onlyOwner {
         // 1. Mark drift and decide whether to start/continue a rebalance
-        DriftResult memory drift = _updatePricesAndCheckDrift();
+        DriftResult memory drift;
 
         // If a new drift above threshold appears and no rebalance is pending, open window on hook
         (bool pendingRebalance, , , , ) = hook.rebalanceState();
-        if (drift.shouldRebalance && !pendingRebalance) {
+
+        if (!pendingRebalance) {
+            drift =  _updatePricesAndCheckDrift();
+
+            if (!drift.shouldRebalance) {
+                return;
+            }
+
             hook.startRebalance(drift.targetAsset, drift.batches);
+            pendingRebalance = true; 
         }
 
         // If still no rebalance, nothing to do
@@ -408,19 +481,17 @@ contract StealthfolioVault is Ownable {
             return;
         }
 
-        // 3. Approve tokens if needed
-        _approveIfNeeded(params.poolKey, params.amountSpecified, params.zeroForOne);
+        // 3. Call manager.lock with encoded params
+        RebalanceExecData memory exec = RebalanceExecData({
+            poolKey: params.poolKey, 
+            zeroForOne: params.zeroForOne, 
+            amountSpecified: params.amountSpecified
+        }); 
 
-        // 4. Execute swap through PoolManager
-        _executeSwap(params.poolKey, params.zeroForOne, params.amountSpecified);
-
-        // 5. Notify hook with executed batch details
-        hook.markBatchExecuted(params.poolKey, params.zeroForOne, params.amountSpecified);
+        // 4. Retrieve Lock and trigger unlock callback
+        manager.unlock(abi.encode(exec)); 
     }
 
-    // ======================
-    // Internal
-    // ======================
 
     function _approveIfNeeded(
         PoolKey memory key,
@@ -434,22 +505,65 @@ contract StealthfolioVault is Ownable {
         IERC20(tokenIn).approve(address(manager), amount);
     }
 
-    function _executeSwap(
-        PoolKey memory key,
-        bool zeroForOne,
-        uint256 amountSpecified
-    ) internal {
+
+    function _settleOneLeg(Currency currency, int128 deltaAmount) internal {
+    if (deltaAmount < 0) {
+        // Vault owes tokens → must pay
+        uint256 pay = uint256(int256(-deltaAmount));
+
+
+        // Must checkpoint current balance *before* sending
+        manager.sync(currency);
+
+        // Pay the owed ERC20 token to PoolManager
+        IERC20(Currency.unwrap(currency)).transfer(address(manager), pay);
+
+         // 3. Settle payment
+        manager.settle();
+
+    } else if (deltaAmount > 0) {
+        // Vault should receive tokens → pull them via take()
+        uint256 recv = uint256(int256(deltaAmount));
+        manager.take(currency, address(this), recv);
+    }
+    // else delta == 0 → do nothing
+}
+
+
+    function _settleSwapDelta(PoolKey memory key, BalanceDelta delta) internal {
+        _settleOneLeg(key.currency0, delta.amount0());
+        _settleOneLeg(key.currency1, delta.amount1());
+    }
+
+    function unlockCallback(bytes calldata data) external override returns(bytes memory){
+        require(msg.sender == address(manager), "UNAUTHORIZED_MANAGER");
+        RebalanceExecData memory exec = abi.decode(data, (RebalanceExecData));
+        
+        // 1. Approve tokenIn to PoolManager if needed
+        _approveIfNeeded(exec.poolKey, exec.amountSpecified, exec.zeroForOne);
+
+        // 2. Build SwapParams
+        // amountSpecified must be negative for exact input swaps
         SwapParams memory params = SwapParams({
-            zeroForOne: zeroForOne,
-            amountSpecified: int256(amountSpecified),
-            // Use the min/max sqrt price limits recommended by v4-core:
-            // - for zeroForOne, set a lower bound just above MIN_SQRT_PRICE
-            // - for oneForZero, set an upper bound just below MAX_SQRT_PRICE
-            sqrtPriceLimitX96: zeroForOne
+            zeroForOne: exec.zeroForOne,
+            amountSpecified: -int256(exec.amountSpecified),
+            sqrtPriceLimitX96: exec.zeroForOne
                 ? TickMath.MIN_SQRT_PRICE + 1
                 : TickMath.MAX_SQRT_PRICE - 1
         });
 
-        manager.swap(key, params, bytes(""));
+        // 3. This is now allowed 
+        BalanceDelta delta = manager.swap(exec.poolKey, params, bytes(""));
+        _settleSwapDelta(exec.poolKey, delta); 
+
+
+
+        // 4. Notify the hook we executed a batch
+        hook.markBatchExecuted(exec.poolKey, exec.zeroForOne, exec.amountSpecified);
+
+        // Optional
+        return bytes("");
+
     }
+
 }
