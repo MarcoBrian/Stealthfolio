@@ -103,6 +103,9 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
         uint32 _minDriftCheckInterval
     ) external onlyOwner {
         require(_batchSizeBps > 0 && _batchSizeBps <= 10_000, "INVALID_BATCH_BPS");
+        // Prevent reconfiguration during active rebalance to avoid breaking in-progress operations
+        (bool pendingRebalance, , , , ) = hook.rebalanceState();
+        require(!pendingRebalance, "REBALANCE_IN_PROGRESS");
 
         baseAsset = hook.baseAsset();
 
@@ -112,6 +115,8 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
             minDriftCheckInterval: _minDriftCheckInterval
         });
 
+        // Reset state when reconfiguring strategy parameters
+        // This allows immediate drift checks (lastDriftCheckBlock = 0) and clears old drift data
         strategyState = StrategyState({
             lastDriftBps: 0,
             lastDriftCheckBlock: 0,

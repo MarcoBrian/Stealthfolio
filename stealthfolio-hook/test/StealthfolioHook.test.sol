@@ -421,7 +421,7 @@ contract StealthfolioTest is Test, Deployers {
     }
 
     function testRebalanceStep_CompletesAllBatches() public {
-        // Arrange: create drift on WBTC as before
+        // Simulate price change on BTC to 50k USD 
         wbtcFeed.updateAnswer(50_000e8);
 
         // Capture initial balances
