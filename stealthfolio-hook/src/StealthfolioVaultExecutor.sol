@@ -479,6 +479,8 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
             return;
         }
 
+        
+
         // 2. Fetch batch params from vault strategy math
         BatchParams memory params = _computeBatchParams();
 

@@ -8,14 +8,19 @@ import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {MockV3Aggregator} from "@chainlink/local/src/data-feeds/MockV3Aggregator.sol";
+import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
 
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
+import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {PoolKey, PoolIdLibrary} from "v4-core/types/PoolKey.sol";
 import {PoolId} from "v4-core/types/PoolId.sol";
 
+import {TickMath} from "v4-core/libraries/TickMath.sol";
+import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
+import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
 import {StealthfolioVault} from "../src/StealthfolioVaultExecutor.sol";
 import {StealthfolioHook} from "../src/hooks/StealthfolioHook.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
@@ -133,6 +138,13 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
     StealthfolioVaultHarness vault;
     StealthfolioHook hook;
 
+    PoolKey wbtcPoolKey;
+    PoolKey wethPoolKey;
+    PoolId wbtcPoolId;
+    PoolId wethPoolId;
+
+    uint24 constant FEE = 3000;
+    int24 constant TICK_SPACING = 60;
 
     MockERC20 usdc;
     MockERC20 wbtc;
@@ -147,17 +159,20 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
     Currency currencyWETH;
 
     function setUp() public {
-        // Dummy manager/hook, not used by _updatePricesAndCheckDrift
-
         // Deploy PoolManager and Router contracts
         deployFreshManagerAndRouters();
 
+        uint8 usdcDecimals = 6 ; 
+        uint8 wbtcDecimals = 8 ; 
+        uint8 wethDecimals = 18; 
 
         // Deploy hook
         uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG);
         address hookAddress = address(flags);
         deployCodeTo("StealthfolioHook.sol", abi.encode(manager), hookAddress);
         hook = StealthfolioHook(hookAddress);
+
+        
 
         vault = new StealthfolioVaultHarness(manager, hook);
 
@@ -183,6 +198,183 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
             2_500, // batchSizeBps: 25%
             1 // minDriftCheckInterval: 1 block
         );
+
+         // Configure hook
+        hook.configureHook(
+            address(vault),
+            currencyUSDC,
+            10, // rebalanceCooldown: 10 blocks
+            100, // rebalanceMaxDuration: 100 blocks
+            1e18 // maxExternalSwapAmount: 1e18
+        );
+
+
+        // Calculate BTCUSD SqrtPrice
+
+        (Currency token0, Currency token1, uint160 sqrtPriceBTC_USDC) = 
+                            CalculatePrice.computeInitSqrtPrice(currencyWBTC, 
+                            currencyUSDC, 
+                            wbtcDecimals, 
+                            usdcDecimals, 100_000); 
+
+        
+        // Create pools swaps
+        // Create BTC/USDC Pool 
+        wbtcPoolKey = PoolKey({
+            currency0: token0,
+            currency1: token1,
+            fee: FEE,
+            tickSpacing: TICK_SPACING,
+            hooks: IHooks(address(hook))
+        });
+        wbtcPoolId = wbtcPoolKey.toId();
+
+        uint160 sqrtPriceWETH_USDC; 
+        ( token0,  token1, sqrtPriceWETH_USDC) = 
+        CalculatePrice.computeInitSqrtPrice(currencyWETH, 
+                                            currencyUSDC, 
+                                            wethDecimals, 
+                                            usdcDecimals, 
+                                            3_000); 
+
+
+        
+        // Create WETH/USDC Pool 
+        wethPoolKey = PoolKey({
+            currency0: token0,
+            currency1: token1,
+            fee: FEE,
+            tickSpacing: TICK_SPACING,
+            hooks: IHooks(address(hook))
+        });
+        wethPoolId = wethPoolKey.toId();
+        
+        // Register pools on hook
+        hook.registerStrategyPool(wbtcPoolKey);
+        hook.registerStrategyPool(wethPoolKey);
+        
+        // Set rebalance pools
+        hook.setRebalancePool(currencyWBTC, wbtcPoolKey);
+        hook.setRebalancePool(currencyWETH, wethPoolKey);
+        
+        // Initialize pools and add liquidity
+        manager.initialize(wbtcPoolKey, sqrtPriceBTC_USDC);
+        manager.initialize(wethPoolKey, sqrtPriceWETH_USDC);
+        
+        // Add liquidity to pools (mint tokens to this contract first)
+        usdc.mint(address(this), 10_000_000e6);
+        wbtc.mint(address(this), 100e8);
+        weth.mint(address(this), 1000e18);
+        
+        usdc.approve(address(manager), type(uint256).max);
+        wbtc.approve(address(manager), type(uint256).max);
+        weth.approve(address(manager), type(uint256).max);
+
+
+        usdc.approve(address(modifyLiquidityRouter), type(uint256).max);
+        wbtc.approve(address(modifyLiquidityRouter), type(uint256).max);
+        weth.approve(address(modifyLiquidityRouter), type(uint256).max);
+
+
+        usdc.approve(address(swapRouter), type(uint256).max);
+        wbtc.approve(address(swapRouter), type(uint256).max);
+        weth.approve(address(swapRouter), type(uint256).max);
+
+        // Tick Math calculation for BTC / USDC Pair 
+
+        int24 currentTickBTCUSDC = TickMath.getTickAtSqrtPrice(sqrtPriceBTC_USDC);
+
+        // Tick Math calculation for WETH / USDC Pair 
+        int24 currentTickWETHUSDC = TickMath.getTickAtSqrtPrice(sqrtPriceWETH_USDC); 
+
+        console.log("BTC Sqrt Price:", sqrtPriceBTC_USDC); 
+        console.log("BTC current Tick: " , currentTickBTCUSDC);
+        console.log("");
+        console.log("WETH Sqrt Price:", sqrtPriceWETH_USDC); 
+        console.log("WETH Current Tick:", currentTickWETHUSDC); 
+
+        int24 tickLowerBTCUSDC = (currentTickBTCUSDC / TICK_SPACING - 1) * TICK_SPACING;
+        int24 tickUpperBTCUSDC = (currentTickBTCUSDC / TICK_SPACING + 1) * TICK_SPACING;
+        
+
+        int24 tickLowerWETHUSDC = (currentTickWETHUSDC / TICK_SPACING - 10) * TICK_SPACING;
+        int24 tickUpperWETHUSDC = (currentTickWETHUSDC / TICK_SPACING + 10) * TICK_SPACING;
+
+        uint160 sqrtPriceLowerX96BTCUSD = TickMath.getSqrtPriceAtTick(tickLowerBTCUSDC);
+        uint160 sqrtPriceUpperX96BTCUSD = TickMath.getSqrtPriceAtTick(tickUpperBTCUSDC);
+
+        uint160 sqrtPriceLowerX96WETHUSD = TickMath.getSqrtPriceAtTick(tickLowerWETHUSDC);
+        uint160 sqrtPriceUpperX96WETHUSD = TickMath.getSqrtPriceAtTick(tickUpperWETHUSDC);
+
+
+        uint256 amount0USDCDesired = 1_000_000e6; // 1M USDC
+        uint256 amount1WBTCDesired = 10e8;        // 10 WBTC    
+
+
+        uint256 amountUSDCDesired = 300_000e6; // 300,000 in USDC
+        uint256 amount1WETHDesired = 100e18;        // 100 WETH    
+
+
+        uint128 liquidityBTCUSD = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceBTC_USDC, 
+            sqrtPriceLowerX96BTCUSD,
+            sqrtPriceUpperX96BTCUSD,
+            amount0USDCDesired,
+            amount1WBTCDesired
+        );
+
+        uint128 liquidityWETHUSD = LiquidityAmounts.getLiquidityForAmounts(
+            sqrtPriceWETH_USDC, 
+            sqrtPriceLowerX96WETHUSD,
+            sqrtPriceUpperX96WETHUSD,
+            amountUSDCDesired,
+            amount1WETHDesired
+        );
+
+
+        // Add liquidity using modifyLiquidityRouter - WBTC
+        ModifyLiquidityParams memory liqParamsBTC = ModifyLiquidityParams({
+            tickLower: tickLowerBTCUSDC,
+            tickUpper: tickUpperBTCUSDC,
+            liquidityDelta: int256(uint256(liquidityBTCUSD)),
+            salt: bytes32(0)
+        });
+
+        // Add liquidity using modifyLiquidityRouter - WETH
+        ModifyLiquidityParams memory liqParamsWETH = ModifyLiquidityParams({
+            tickLower: tickLowerWETHUSDC,
+            tickUpper: tickUpperWETHUSDC,
+            liquidityDelta: int256(uint256(liquidityWETHUSD)),
+            salt: bytes32(0)
+        });
+
+
+        (uint256 amount0, uint256 amount1) =
+        LiquidityAmounts.getAmountsForLiquidity(
+            sqrtPriceBTC_USDC,
+            sqrtPriceLowerX96BTCUSD,
+            sqrtPriceUpperX96BTCUSD,
+            liquidityBTCUSD
+        );
+
+        console.log("Amount 0 BTCUSD:", amount0); 
+        console.log("Amount 1 BTCUSD:", amount1); 
+
+        (amount0, amount1) =
+        LiquidityAmounts.getAmountsForLiquidity(
+            sqrtPriceWETH_USDC,
+            sqrtPriceLowerX96WETHUSD,
+            sqrtPriceUpperX96WETHUSD,
+            liquidityWETHUSD
+        );
+
+
+        console.log("Amount 0 WETHUSD:", amount0); 
+        console.log("Amount 1 WETHUSD:", amount1); 
+        
+        modifyLiquidityRouter.modifyLiquidity(wbtcPoolKey, liqParamsBTC, bytes(""));
+        modifyLiquidityRouter.modifyLiquidity(wethPoolKey, liqParamsWETH, bytes(""));
+        
 
         // Set portfolio targets: 50% USDC, 30% WBTC, 20% WETH
         Currency[] memory assets = new Currency[](3);
@@ -502,14 +694,170 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
 
     // ====== AmountSpecified Scaling Tests ============
     function testComputeBatchParams_OverweightWBTC_AmountSpecifiedUsesWBTCBalance() public {
+         // --- Arrange: make WBTC strongly overweight vs target ---
+        // - baseAsset = USDC
+        // - portfolioAssets = [USDC, WBTC, WETH]
+        // - targetAllocBps for each
 
+        // Push WBTC value way up so its share is > target share.
+        wbtcFeed.updateAnswer(200_000e8);   // 1 WBTC = 200,000 USDC
+        wethFeed.updateAnswer(1_000e8);     // 1 WETH = 1,000 USDC
+        usdcFeed.updateAnswer(1e8);         // 1 USDC = 1 USDC
+
+        // Update prices & compute drift; this will also set strategyState.targetAsset
+        StealthfolioVault.DriftResult memory drift =
+            vault.updatePricesAndCheckDriftHarness();
+
+        // We expect:
+        // - drift.shouldRebalance == true
+        // - targetAsset == WBTC, because WBTC is now overweight
+        assertTrue(drift.shouldRebalance, "shouldRebalance must be true");
+        assertEq(
+            Currency.unwrap(drift.targetAsset),
+            address(wbtc),
+            "WBTC should be selected as targetAsset for rebalance"
+        );
+
+        // --- Act: compute batch params from strategy state and cached prices ---
+
+        StealthfolioVault.BatchParams memory params =
+            vault.computeBatchParamsHarness();
+
+        // --- Assert: direction + amount semantics ---
+
+        // Because WBTC is overweight, we should be SELLING WBTC for base
+        // => input token must be WBTC, so amountSpecified is in WBTC units.
+        // For an overweight asset:
+        //  - if asset is token0 → zeroForOne == true, input is token0 (asset)
+        //  - if asset is token1 → zeroForOne == false, input is token1 (asset)
+
+        Currency asset = drift.targetAsset;
+        bool assetIsToken0 = (asset == params.poolKey.currency0);
+
+        if (assetIsToken0) {
+            // WBTC is token0, overweight => SELL token0 → token1
+            assertTrue(params.zeroForOne, "asset token0 overweight, zeroForOne must be true");
+        } else {
+            // WBTC is token1, overweight => SELL token1 → token0
+            assertFalse(params.zeroForOne, "asset token1 overweight, zeroForOne must be false");
+        }
+
+        // And we should NEVER try to sell more WBTC than the vault actually has.
+        uint256 wbtcBal = wbtc.balanceOf(address(vault));
+        assertLe(
+            params.amountSpecified,
+            wbtcBal,
+            "amountSpecified should not exceed vault WBTC balance"
+        );
+
+        // Optional: sanity check that we are actually moving a non-zero amount.
+        assertGt(params.amountSpecified, 0, "amountSpecified should be > 0 for overweight WBTC");
+            
     }
 
     function  testComputeBatchParams_AssetUnderweight_AmountSpecifiedUsesBaseBalance() public {
+        // --- Arrange: make WBTC underweight vs target ---
 
+        // Make WBTC cheap and USDC/WETH relatively more valuable,
+        // so WBTC's share of total value is below its target.
+        wbtcFeed.updateAnswer(1_000e8);     // 1 WBTC = 1,000 USDC
+        wethFeed.updateAnswer(3_000e8);     // 1 WETH = 3,000 USDC
+        usdcFeed.updateAnswer(1e8);         // 1 USDC = 1 USDC
+
+        // Recompute drift
+        StealthfolioVault.DriftResult memory drift =
+            vault.updatePricesAndCheckDriftHarness();
+
+        // We expect a rebalance, with WBTC as the underweight asset
+        assertTrue(drift.shouldRebalance, "shouldRebalance must be true");
+        assertEq(
+            Currency.unwrap(drift.targetAsset),
+            address(wbtc),
+            "WBTC should be targetAsset (underweight)"
+        );
+
+        // --- Act: compute batch params ---
+
+        StealthfolioVault.BatchParams memory params =
+            vault.computeBatchParamsHarness();
+
+        // --- Assert: direction + amount semantics ---
+
+        // Underweight asset => BUY asset with base
+        // So input token must be baseAsset (USDC).
+        Currency base = vault.baseAsset();
+        Currency asset = drift.targetAsset;
+        bool assetIsToken0 = (asset == params.poolKey.currency0);
+
+        // Our swap direction logic says:
+        //  - dev > 0 (underweight)
+        //  - if assetIsToken0 → zeroForOne = false → token1 (base) → token0 (asset)
+        //  - if assetIsToken1 → zeroForOne = true  → token0 (base) → token1 (asset)
+        if (assetIsToken0) {
+            assertFalse(
+                params.zeroForOne,
+                "asset token0 underweight, zeroForOne must be false (base -> asset)"
+            );
+            // zeroForOne = false: input is token1, so token1 must be base
+            assertEq(
+                Currency.unwrap(params.poolKey.currency1),
+                Currency.unwrap(base),
+                "token1 must be base asset when buying asset token0"
+            );
+        } else {
+            assertTrue(
+                params.zeroForOne,
+                "asset token1 underweight => zeroForOne must be true (base => asset)"
+            );
+            // zeroForOne = true: input is token0, so token0 must be base
+            assertEq(
+                Currency.unwrap(params.poolKey.currency0),
+                Currency.unwrap(base),
+                "token0 must be base asset when buying asset token1"
+            );
+        }
+
+        // And the batch size must not exceed available base balance.
+        uint256 baseBal = IERC20(Currency.unwrap(base)).balanceOf(address(vault));
+        assertLe(
+            params.amountSpecified,
+            baseBal,
+            "amountSpecified should not exceed vault base balance"
+        );
+
+        assertGt(
+            params.amountSpecified,
+            0,
+            "amountSpecified should be > 0 when asset is underweight"
+        );
     }
+    
 
     function testComputeBatchParams_ZeroDeviation_ReturnsZeroAmount() public {
+        // --- Arrange: configure a single-asset portfolio = 100% baseAsset ---
+
+        Currency base = currencyUSDC; // assuming you have this in your test setUp
+
+        // Override portfolio to [base] with 100% allocation
+        Currency[] memory assets = new Currency[](1);
+        assets[0] = base;
+
+        uint16[] memory bps = new uint16[](1); 
+        bps[0] = 10_000; // 100%
+
+        // Need to be owner in tests
+        vault.setPortfolioTargets(assets, bps);
+        vault.setPriceFeed(base, address(usdcFeed));
+
+        // Ensure we have some base balance in the vault
+        // (you probably already deposited in setUp; if not, do it here)
+        // usdc.mint(address(vault), 1_000_000e6); // if needed
+
+        // Update prices so lastPriceInBase[base] is non-zero
+        StealthfolioVault.DriftResult memory drift = vault.updatePricesAndCheckDriftHarness();
+
+        assertFalse(drift.shouldRebalance, "Should not rebalance");
+
 
     }
 
