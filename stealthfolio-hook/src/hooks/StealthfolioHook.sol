@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 // OpenZeppelin
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 // Uniswap v4 imports
 import {BaseHook} from "v4-periphery/src/utils/BaseHook.sol";
@@ -15,10 +16,14 @@ import {BeforeSwapDelta, BeforeSwapDeltaLibrary} from "@uniswap/v4-core/src/type
 import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol"; 
 
 contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
+    using StateLibrary for IPoolManager;
+
+
 
 
     constructor(IPoolManager _manager) BaseHook(_manager) Ownable(msg.sender) {}
@@ -77,7 +82,66 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
     mapping(PoolId => PoolKey) public poolKeys;
     mapping(Currency => PoolId) public rebalancePool; // asset => poolId(asset/base)
 
+    // ======== Hook Safeguards =============
+
+    // Volatility band safeguards to prevent making trades on highly manipulated environments
+    struct VolBand {
+        uint160 centerSqrtPriceX96;  
+        uint16 widthBps; // +/- band in basis points, e.x 500 = +/- 5% 
+        bool enabled; 
+    }
+
+    mapping(PoolId => VolBand) internal volBands;
+
+    // Max Trade guards to prevent big price changes and manipulation
+    struct MaxTradeGuard {
+        uint256 maxAmount;
+        bool enabled; 
+    }
+
+    mapping(PoolId => MaxTradeGuard) public maxTradeGuards;
+
+    // Toxic Flow safe guards 
+    struct ToxicFlowConfig {
+        bool enabled;
+
+        uint32 windowBlocks;          // length of window, e.g. 20 blocks
+        uint8  maxSameDirLargeTrades; // max # of large trades in same direction per window, e.g. 3
+        uint256 minLargeTradeAmount;  // only count trades >= this size (raw token units)
+    }
+
+    struct ToxicFlowState {
+        uint32 windowStartBlock;
+        uint8 sameDirCount;
+        bool lastZeroForOne;
+    }
+
+    mapping(PoolId => ToxicFlowConfig) public toxicConfigs;
+    mapping(PoolId => ToxicFlowState) internal toxicStates;
+
     // ========= Events =========
+
+    event VolBandUpdated(
+        PoolId indexed poolId,
+        uint160 centerSqrtPriceX96,
+        uint16 widthBps,
+        bool enabled
+    );
+
+
+    event MaxTradeGuardUpdated(
+        PoolId indexed poolId,
+        uint256 maxAmount,
+        bool enabled
+    );
+
+     event ToxicFlowConfigUpdated(
+        PoolId indexed poolId,
+        bool enabled,
+        uint32 windowBlocks,
+        uint8 maxSameDirLargeTrades,
+        uint256 minLargeTradeAmount
+    );
 
     event HookConfigured(
         address indexed vault,
@@ -113,6 +177,56 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
     }
 
     // ========= Admin: hook config =========
+
+    // Set volatility band 
+    function setVolBand(PoolKey  calldata key, uint160 centerSqrtPriceX96, uint16 widthBps) external onlyOwner {
+        PoolId poolId = key.toId(); 
+        require(isStrategyPool[poolId], "Pool not strategy"); 
+        require(widthBps > 0, "Width zero"); 
+
+        // if center is zero anchor to current sqrtPrice 
+        if (centerSqrtPriceX96 == 0) {
+                (uint160 currentSqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
+            centerSqrtPriceX96 = currentSqrtPriceX96;
+        } 
+        
+        volBands[poolId] = VolBand({
+            centerSqrtPriceX96: centerSqrtPriceX96,
+            widthBps: widthBps,
+            enabled: true
+        });
+
+        emit VolBandUpdated(poolId, centerSqrtPriceX96, widthBps, true);
+    }
+
+    function disableVolBand(PoolKey calldata key) external onlyOwner {
+        PoolId poolId = key.toId();
+        VolBand storage band = volBands[poolId];
+        band.enabled = false;
+
+        emit VolBandUpdated(poolId, band.centerSqrtPriceX96, band.widthBps, false);
+    }
+
+    // Set Max trade guard 
+    function setMaxTradeGuard(PoolKey calldata key, uint256 maxAmount) external onlyOwner
+    {
+        PoolId poolId = key.toId();
+        require(isStrategyPool[poolId], "POOL_NOT_STRATEGY");
+        require(maxAmount > 0, "INVALID_MAX");
+
+        maxTradeGuards[poolId] = MaxTradeGuard({
+            maxAmount: maxAmount,
+            enabled: true
+        });
+
+        emit MaxTradeGuardUpdated(poolId, maxAmount, true);
+    }
+
+    function disableMaxTradeGuard(PoolKey calldata key) external onlyOwner {
+        PoolId poolId = key.toId();
+        maxTradeGuards[poolId].enabled = false;
+        emit MaxTradeGuardUpdated(poolId, maxTradeGuards[poolId].maxAmount, false);
+    }
 
     function configureHook(
         address _vault,
@@ -151,6 +265,36 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
             _rebalanceCooldown,
             _rebalanceMaxDuration,
             _maxExternalSwapAmount
+        );
+    }
+
+    // Set Toxic Flow Configuration
+    function setToxicFlowConfig(
+        PoolKey calldata key,
+        bool enabled,
+        uint32 windowBlocks,
+        uint8 maxSameDirLargeTrades,
+        uint256 minLargeTradeAmount
+    ) external onlyOwner {
+        PoolId poolId = key.toId();
+        require(isStrategyPool[poolId], "POOL_NOT_STRATEGY");
+        require(windowBlocks > 0, "WINDOW_ZERO");
+        require(maxSameDirLargeTrades > 0, "MAX_TRADES_ZERO");
+        // minLargeTradeAmount can be 0 if you want "all trades" to count
+
+        toxicConfigs[poolId] = ToxicFlowConfig({
+            enabled: enabled,
+            windowBlocks: windowBlocks,
+            maxSameDirLargeTrades: maxSameDirLargeTrades,
+            minLargeTradeAmount: minLargeTradeAmount
+        });
+
+        emit ToxicFlowConfigUpdated(
+            poolId,
+            enabled,
+            windowBlocks,
+            maxSameDirLargeTrades,
+            minLargeTradeAmount
         );
     }
 
@@ -259,7 +403,7 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
             st.nextBatchBlock = uint32(block.number + 1);
         }
     }
-    // ========= Hook: beforeSwap (drift guard) =========
+    // ========= Hook: beforeSwap =========
 
     /**
      * @notice Checks if rebalance window has expired and clears state if so.
@@ -280,12 +424,98 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
         }
     }
 
+    // ========== Hook : enforce VolBand ===============
+    function _enforceVolBand(PoolKey calldata key) internal view {
+        PoolId poolId = key.toId(); 
+        VolBand storage band = volBands[poolId]; 
+        if (!band.enabled) {
+            return; 
+        }
+
+        (uint160 currentSqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
+
+        // band.widthBps is in BPS around center
+        // lower = center * (1 - widthBps/10_000)
+        // upper = center * (1 + widthBps/10_000)
+        uint256 lower = (uint256(band.centerSqrtPriceX96) * (10_000 - band.widthBps)) / 10_000;
+        uint256 upper = (uint256(band.centerSqrtPriceX96) * (10_000 + band.widthBps)) / 10_000;
+
+        require(
+            currentSqrtPriceX96 >= lower && currentSqrtPriceX96 <= upper,
+            "VOL_BAND_BREACH"
+        );
+    }
+
+    // ======= Hook : Max Trade Guard  ======== 
+    function _enforceMaxTradeGuard(PoolKey calldata key, SwapParams calldata params) internal view {
+        MaxTradeGuard memory maxTradeGuard = maxTradeGuards[key.toId()]; 
+        if (!maxTradeGuard.enabled) {
+            return ;
+        } 
+
+        uint256 absAmount = _abs(params.amountSpecified);
+
+        require(absAmount <= maxTradeGuard.maxAmount, "Max Trade"); 
+    }
+
+    function _enforceToxicFlowGuard(
+        PoolKey calldata key,
+        SwapParams calldata params
+    ) internal {
+        PoolId poolId = key.toId();
+        ToxicFlowConfig memory cfg = toxicConfigs[poolId];
+        if (!cfg.enabled) {
+            return; 
+        }
+
+        ToxicFlowState storage st = toxicStates[poolId];
+
+        // Reset window if expired
+        if (st.windowStartBlock == 0 || block.number > st.windowStartBlock + cfg.windowBlocks) {
+            st.windowStartBlock = uint32(block.number);
+            st.sameDirCount = 0;
+            // lastZeroForOne can be left as-is; it'll be overwritten on first counted trade
+        }
+
+        // Absolute trade size (we don't care about exactInput/output here)
+        uint256 absAmount = _abs(params.amountSpecified); 
+
+        // Ignore tiny trades
+        if (absAmount < cfg.minLargeTradeAmount) {
+            return;
+        }
+
+        // Count directional sequence
+        if (st.sameDirCount == 0) {
+            // first large trade in window
+            st.sameDirCount = 1;
+            st.lastZeroForOne = params.zeroForOne;
+        } else {
+            if (params.zeroForOne == st.lastZeroForOne) {
+                // same direction as last large trade
+                st.sameDirCount += 1;
+            } else {
+                // direction flipped: start new streak
+                st.sameDirCount = 1;
+                st.lastZeroForOne = params.zeroForOne;
+            }
+        }
+
+        require(
+            st.sameDirCount <= cfg.maxSameDirLargeTrades,
+            "TOXIC_FLOW"
+        );
+    }
+
+
+
     function _beforeSwap(
         address sender,
         PoolKey calldata key,
         SwapParams calldata params,
         bytes calldata
     ) internal override returns (bytes4, BeforeSwapDelta, uint24) {
+        // Check if the pool is part of the strategy 
         if (!isStrategyPool[key.toId()]) {
             return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
@@ -293,21 +523,36 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
         RebalanceState storage st = rebalanceState;
         _checkAndClearExpiredRebalance();
 
+        bool isVaultSwap = (sender == hookConfig.vault);
+
+        // Global safeguard (applied to non-vault swaps)
+        if (!isVaultSwap){
+            // enforce volatility band 
+            _enforceVolBand(key); 
+            // enforce private max trade 
+            _enforceMaxTradeGuard(key, params); 
+            // enforce toxic flow guard 
+            _enforceToxicFlowGuard(key, params);
+
+        }
+
+        // If no rebalance happening, nothing special happens
         if (!st.rebalancePending) {
             return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
 
-        // Vault swaps are always allowed
-        if (sender == hookConfig.vault) {
+        // Allow vault swaps
+        if (isVaultSwap) {
             return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
         }
 
-        // For external traders, limit max order size during rebalance
-        uint256 absAmount = params.amountSpecified > 0
-            ? uint256(params.amountSpecified)
-            : uint256(-params.amountSpecified);
-        require(absAmount <= hookConfig.maxExternalSwapAmount, "REBAL_PROTECTED");
 
         return (this.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, 0);
     }
+
+    // ======== Helpers ==================
+    function _abs(int256 x) internal pure returns (uint256) {
+        return x >= 0 ? uint256(x) : uint256(-x);
+    }
+
 }
