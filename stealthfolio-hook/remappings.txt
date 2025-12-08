@@ -7,12 +7,14 @@
 chainlink-ccip/=lib/chainlink-local/lib/chainlink-ccip/chains/evm/contracts/vendor/optimism/interop-lib/v0/src/
 chainlink-evm/=lib/chainlink-local/lib/chainlink-evm/
 chainlink-local/=lib/chainlink-local/src/
+@fhenixprotocol/cofhe-contracts/=lib/cofhe-contracts/contracts/
+cofhe-mock-contracts/=lib/cofhe-mock-contracts/contracts/
 ds-test/=lib/v4-periphery/lib/v4-core/lib/forge-std/lib/ds-test/src/
 erc4626-tests/=lib/openzeppelin-contracts/lib/erc4626-tests/
 forge-gas-snapshot/=lib/v4-periphery/lib/permit2/lib/forge-gas-snapshot/src/
 forge-std/=lib/forge-std/src/
 halmos-cheatcodes/=lib/openzeppelin-contracts/lib/halmos-cheatcodes/src/
-hardhat/=lib/v4-periphery/lib/v4-core/node_modules/hardhat/
+hardhat/=lib/cofhe-mock-contracts/node_modules/hardhat/
 openzeppelin-contracts/=lib/openzeppelin-contracts/
 permit2/=lib/v4-periphery/lib/permit2/
 solmate/=lib/v4-periphery/lib/v4-core/lib/solmate/

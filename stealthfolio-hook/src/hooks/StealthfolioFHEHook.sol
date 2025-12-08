@@ -18,10 +18,20 @@ import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol"; 
 
-contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
+import {FHE,
+    InEuint128,
+    InEuint256,
+    InEuint32,
+    euint128,
+    euint256,
+    euint32} from "@fhenixprotocol/cofhe-contracts/FHE.sol";
+
+contract StealthfolioFHEHook is BaseHook, Ownable, ReentrancyGuard {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
     using StateLibrary for IPoolManager;
+
+    using FHE for uint256; 
 
 
 
@@ -85,8 +95,8 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
 
     // Volatility band safeguards to prevent making trades on highly manipulated environments
     struct VolBand {
-        uint160 centerSqrtPriceX96;  
-        uint16 widthBps; // +/- band in basis points, e.x 500 = +/- 5% 
+        euint256 encryptedCenterSqrtPriceX96;  
+        euint32 encryptedWidthBps; // +/- band in basis points, e.x 500 = +/- 5% 
         bool enabled; 
     }
 
@@ -94,7 +104,7 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
 
     // Max Trade guards to prevent big price changes and manipulation
     struct MaxTradeGuard {
-        uint256 maxAmount;
+        euint128 encryptedMaxTrade; // FHE handle
         bool enabled; 
     }
 
@@ -103,10 +113,9 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
     // Toxic Flow safe guards 
     struct ToxicFlowConfig {
         bool enabled;
-
-        uint32 windowBlocks;          // length of window, e.g. 20 blocks
-        uint8  maxSameDirLargeTrades; // max # of large trades in same direction per window, e.g. 3
-        uint256 minLargeTradeAmount;  // only count trades >= this size (raw token units)
+        euint32  encWindowBlocks;          // encrypted window length
+        euint32  encMaxSameDirLargeTrades; // encrypted max streak length
+        euint256 encMinLargeTradeAmount;   // encrypted threshold for "large" trade
     }
 
     struct ToxicFlowState {
@@ -122,24 +131,18 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
 
     event VolBandUpdated(
         PoolId indexed poolId,
-        uint160 centerSqrtPriceX96,
-        uint16 widthBps,
         bool enabled
     );
 
 
     event MaxTradeGuardUpdated(
         PoolId indexed poolId,
-        uint256 maxAmount,
         bool enabled
     );
 
      event ToxicFlowConfigUpdated(
         PoolId indexed poolId,
-        bool enabled,
-        uint32 windowBlocks,
-        uint8 maxSameDirLargeTrades,
-        uint256 minLargeTradeAmount
+        bool enabled
     );
 
     event HookConfigured(
@@ -177,24 +180,34 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
     // ========= Admin: hook config =========
 
     // Set volatility band 
-    function setVolBand(PoolKey  calldata key, uint160 centerSqrtPriceX96, uint16 widthBps) external onlyOwner {
+    function setVolBand(PoolKey  calldata key, 
+                InEuint256 calldata encCenterSqrtPriceX96,
+                InEuint32  calldata encWidthBps) external onlyOwner {
         PoolId poolId = key.toId(); 
         require(isStrategyPool[poolId], "Pool not strategy"); 
-        require(widthBps > 0, "Width zero"); 
 
-        // if center is zero anchor to current sqrtPrice 
-        if (centerSqrtPriceX96 == 0) {
-                (uint160 currentSqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
-            centerSqrtPriceX96 = currentSqrtPriceX96;
-        } 
-        
+
+        // Turn inbound encrypted calldata into FHE handles
+        euint256 centerHandle = FHE.asEuint256(encCenterSqrtPriceX96);
+        euint32  widthHandle  = FHE.asEuint32(encWidthBps);
+
         volBands[poolId] = VolBand({
-            centerSqrtPriceX96: centerSqrtPriceX96,
-            widthBps: widthBps,
+            encryptedCenterSqrtPriceX96: centerHandle,
+            encryptedWidthBps: widthHandle,
             enabled: true
         });
+       
+        
+        // Let this contract use the handles + their decrypted values
+        FHE.allowThis(centerHandle);
+        FHE.allowThis(widthHandle);
 
-        emit VolBandUpdated(poolId, centerSqrtPriceX96, widthBps, true);
+        // Kick off decryption (off-chain threshold decryption)
+        FHE.decrypt(centerHandle);
+        FHE.decrypt(widthHandle);
+
+
+        emit VolBandUpdated(poolId, true);
     }
 
     function disableVolBand(PoolKey calldata key) external onlyOwner {
@@ -202,28 +215,38 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
         VolBand storage band = volBands[poolId];
         band.enabled = false;
 
-        emit VolBandUpdated(poolId, band.centerSqrtPriceX96, band.widthBps, false);
+        emit VolBandUpdated(poolId, false);
     }
 
     // Set Max trade guard 
-    function setMaxTradeGuard(PoolKey calldata key, uint256 maxAmount) external onlyOwner
+    function setEncryptedMaxTradeGuard(
+            PoolKey calldata key, 
+            InEuint128 calldata maxAmount) external onlyOwner
     {
         PoolId poolId = key.toId();
         require(isStrategyPool[poolId], "POOL_NOT_STRATEGY");
-        require(maxAmount > 0, "INVALID_MAX");
+
+        euint128 _encryptedMaxTrade = FHE.asEuint128(maxAmount);
+
 
         maxTradeGuards[poolId] = MaxTradeGuard({
-            maxAmount: maxAmount,
+            encryptedMaxTrade: _encryptedMaxTrade,
             enabled: true
         });
 
-        emit MaxTradeGuardUpdated(poolId, maxAmount, true);
+        // Let this contract keep using the handle
+        FHE.allowThis(_encryptedMaxTrade); 
+
+        // Kick off decryption (result will be available in later tx)
+        FHE.decrypt(_encryptedMaxTrade); 
+
+        emit MaxTradeGuardUpdated(poolId, true);
     }
 
     function disableMaxTradeGuard(PoolKey calldata key) external onlyOwner {
         PoolId poolId = key.toId();
         maxTradeGuards[poolId].enabled = false;
-        emit MaxTradeGuardUpdated(poolId, maxTradeGuards[poolId].maxAmount, false);
+        emit MaxTradeGuardUpdated(poolId, false);
     }
 
     function configureHook(
@@ -266,30 +289,37 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
     // Set Toxic Flow Configuration
     function setToxicFlowConfig(
         PoolKey calldata key,
-        bool enabled,
-        uint32 windowBlocks,
-        uint8 maxSameDirLargeTrades,
-        uint256 minLargeTradeAmount
+        InEuint32  calldata _encWindowBlocks,
+        InEuint32  calldata _encMaxSameDirLargeTrades,
+        InEuint256 calldata _encMinLargeTradeAmount
     ) external onlyOwner {
         PoolId poolId = key.toId();
         require(isStrategyPool[poolId], "POOL_NOT_STRATEGY");
-        require(windowBlocks > 0, "WINDOW_ZERO");
-        require(maxSameDirLargeTrades > 0, "MAX_TRADES_ZERO");
-        // minLargeTradeAmount can be 0 if you want "all trades" to count
+
+        // Turn inbound encrypted calldata into FHE handles
+        euint32  windowHandle   = FHE.asEuint32(_encWindowBlocks);
+        euint32  maxStreakHandle = FHE.asEuint32(_encMaxSameDirLargeTrades);
+        euint256 minLargeHandle = FHE.asEuint256(_encMinLargeTradeAmount);
 
         toxicConfigs[poolId] = ToxicFlowConfig({
-            enabled: enabled,
-            windowBlocks: windowBlocks,
-            maxSameDirLargeTrades: maxSameDirLargeTrades,
-            minLargeTradeAmount: minLargeTradeAmount
+            enabled: true,
+            encWindowBlocks: windowHandle,
+            encMaxSameDirLargeTrades: maxStreakHandle,
+            encMinLargeTradeAmount: minLargeHandle
         });
+
+        FHE.allowThis(windowHandle);
+        FHE.allowThis(maxStreakHandle);
+        FHE.allowThis(minLargeHandle);
+
+        // Kick off decryption; result will be available in later txs
+        FHE.decrypt(windowHandle);
+        FHE.decrypt(maxStreakHandle);
+        FHE.decrypt(minLargeHandle);
 
         emit ToxicFlowConfigUpdated(
             poolId,
-            enabled,
-            windowBlocks,
-            maxSameDirLargeTrades,
-            minLargeTradeAmount
+            true
         );
     }
 
@@ -426,17 +456,27 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
         if (!band.enabled) {
             return; 
         }
+        // Get decrypted center and width (if Fhenix finished)
+        (uint256 centerPlain, bool centerDecrypted) =
+            FHE.getDecryptResultSafe(band.encryptedCenterSqrtPriceX96);
+        (uint32 widthPlain, bool widthDecrypted) =
+            FHE.getDecryptResultSafe(band.encryptedWidthBps);
+
+        // Policy choice: strict — if not ready, block trading
+        if (!centerDecrypted || !widthDecrypted) {
+            revert("VOL_BAND_NOT_DECRYPTED");
+        }
 
         (uint160 currentSqrtPriceX96, , , ) = poolManager.getSlot0(poolId);
 
         // band.widthBps is in BPS around center
         // lower = center * (1 - widthBps/10_000)
         // upper = center * (1 + widthBps/10_000)
-        uint256 lower = (uint256(band.centerSqrtPriceX96) * (10_000 - band.widthBps)) / 10_000;
-        uint256 upper = (uint256(band.centerSqrtPriceX96) * (10_000 + band.widthBps)) / 10_000;
+        uint256 lower = (uint256(centerPlain) * (10_000 - widthPlain)) / 10_000;
+        uint256 upper = (uint256(centerPlain) * (10_000 + widthPlain)) / 10_000;
 
         require(
-            currentSqrtPriceX96 >= lower && currentSqrtPriceX96 <= upper,
+            uint256(currentSqrtPriceX96) >= lower && uint256(currentSqrtPriceX96) <= upper,
             "VOL_BAND_BREACH"
         );
     }
@@ -448,9 +488,18 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
             return ;
         } 
 
-        uint256 absAmount = _abs(params.amountSpecified);
 
-        require(absAmount <= maxTradeGuard.maxAmount, "Max Trade"); 
+    // Ask Fhenix for the decrypted value (if ready)
+        (uint128 plainLimit, bool decrypted) =
+        FHE.getDecryptResultSafe(maxTradeGuard.encryptedMaxTrade);
+
+        if (!decrypted) {
+            revert("MAX_TRADE_NOT_DECRYPTED");
+        }
+
+
+        uint256 absAmount = _abs(params.amountSpecified);
+        require(absAmount <= uint256(plainLimit), "MAX_TRADE");
     }
 
     function _enforceToxicFlowGuard(
@@ -465,39 +514,58 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
 
         ToxicFlowState storage st = toxicStates[poolId];
 
-        // Reset window if expired
-        if (st.windowStartBlock == 0 || block.number > st.windowStartBlock + cfg.windowBlocks) {
-            st.windowStartBlock = uint32(block.number);
-            st.sameDirCount = 0;
-            // lastZeroForOne can be left as-is; it'll be overwritten on first counted trade
+
+        // 1) Decrypt guardrails (if Fhenix finished)
+        (uint32 windowBlocksPlain, bool wbDec) =
+            FHE.getDecryptResultSafe(cfg.encWindowBlocks);
+        (uint32 maxSamePlain, bool maxDec) =
+            FHE.getDecryptResultSafe(cfg.encMaxSameDirLargeTrades);
+        (uint256 minLargePlain, bool minDec) =
+            FHE.getDecryptResultSafe(cfg.encMinLargeTradeAmount);
+
+        // Strict policy: if config not fully decrypted, block trading under this guard
+        if (!wbDec || !maxDec || !minDec) {
+            revert("TOXIC_CFG_NOT_DECRYPTED");
+        }
+        // Optional sanity checks (don’t leak values, just reject obviously-bad config)
+        if (windowBlocksPlain == 0 || maxSamePlain == 0) {
+            revert("TOXIC_CFG_INVALID");
         }
 
-        // Absolute trade size (we don't care about exactInput/output here)
-        uint256 absAmount = _abs(params.amountSpecified); 
+        // 2) Reset window if expired
+        if (
+            st.windowStartBlock == 0 ||
+            block.number > st.windowStartBlock + uint32(windowBlocksPlain)
+        ) {
+            st.windowStartBlock = uint32(block.number);
+            st.sameDirCount = 0;
+            // lastZeroForOne left as-is; overwritten on first counted trade
+        }
+
+        // 3) Apply large-trade logic with decrypted minLargePlain
+        uint256 absAmount = _abs(params.amountSpecified);
 
         // Ignore tiny trades
-        if (absAmount < cfg.minLargeTradeAmount) {
+        if (absAmount < minLargePlain) {
             return;
         }
 
-        // Count directional sequence
+        // 4) Directional streak counting (unchanged)
         if (st.sameDirCount == 0) {
-            // first large trade in window
             st.sameDirCount = 1;
             st.lastZeroForOne = params.zeroForOne;
         } else {
             if (params.zeroForOne == st.lastZeroForOne) {
-                // same direction as last large trade
                 st.sameDirCount += 1;
             } else {
-                // direction flipped: start new streak
                 st.sameDirCount = 1;
                 st.lastZeroForOne = params.zeroForOne;
             }
         }
 
+        // 5) Enforce encrypted maxSameDirLargeTrades (now in plaintext variable)
         require(
-            st.sameDirCount <= cfg.maxSameDirLargeTrades,
+            st.sameDirCount <= maxSamePlain,
             "TOXIC_FLOW"
         );
     }
