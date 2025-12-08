@@ -16,6 +16,7 @@ import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
+import {StateLibrary} from "v4-core/libraries/StateLibrary.sol"; 
 
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
@@ -54,6 +55,8 @@ contract StealthfolioVaultHarness is StealthfolioVault {
 contract StealthfolioTest is Test, Deployers {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
+    using StateLibrary for IPoolManager;
+
 
     StealthfolioHook hook;
     StealthfolioVaultHarness vault;
@@ -637,6 +640,277 @@ contract StealthfolioTest is Test, Deployers {
 
 
     // ======= Test Hook BeforeSwap functionalities ==============
+
+    // Test volatility band 
+    function testVolBand_AllowsSwapInsideBandAndRevertsOutside() public {
+        // 1) Set a tight vol band around the *current* WETH/USDC price
+        PoolId poolId = wethPoolKey.toId();
+
+        (uint160 currentSqrtPriceX96, , , ) = manager.getSlot0(poolId);
+
+        // Very tight band, e.g. 10 bps (~0.1%)
+        uint16 widthBps = 10;
+
+        // Set explicitly with current center (don’t use center = 0 here)
+        hook.setVolBand(wethPoolKey, currentSqrtPriceX96, widthBps);
+
+        // 2) First swap: should pass (price initially inside band)
+
+        bool zeroForOne = (wethPoolKey.currency0 == currencyWETH);
+        uint256 largeAmountIn = 50e18; // 50 WETH (big vs your liquidity)
+
+        // Mint to this contract and approve manager
+        weth.mint(address(this), largeAmountIn);
+        weth.approve(address(manager), largeAmountIn);
+
+        SwapParams memory params1 = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(largeAmountIn), // exact input of tokenIn
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+
+        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
+
+        // First swap should NOT revert
+        swapRouter.swap(wethPoolKey, params1, settings, bytes(""));
+
+        // 3) Second swap: now price likely moved significantly.
+        // We try another small swap; if current price is outside band,
+        // it should revert with VOL_BAND_BREACH.
+
+        uint256 smallAmountIn = 1e18; // 1 WETH
+
+        weth.mint(address(this), smallAmountIn);
+        weth.approve(address(manager), smallAmountIn);
+
+        SwapParams memory params2 = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(smallAmountIn),
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+
+        vm.expectRevert();
+        swapRouter.swap(wethPoolKey, params2, settings, bytes(""));
+    }
+
+    function testVolBand_AllowsSwapsWhenInsideBand() public {
+        PoolId poolId = wethPoolKey.toId();
+        (uint160 currentSqrtPriceX96, , , ) = manager.getSlot0(poolId);
+
+        hook.setVolBand(wethPoolKey, currentSqrtPriceX96, 5_000); // +/- 50%
+
+        bool zeroForOne = (wethPoolKey.currency0 == currencyWETH);
+        uint256 amountIn = 1e18;
+
+        weth.mint(address(this), amountIn);
+        weth.approve(address(manager), amountIn);
+
+        SwapParams memory params = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(amountIn),
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+
+        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
+
+        // Should not revert
+        swapRouter.swap(wethPoolKey, params, settings, bytes(""));
+    }
+
+    // Test the Max Trade Guard 
+    function testMaxTradeGuard_RevertsWhenExceedingLimit() public {
+        // Enable max trade guard on WETH/USDC pool
+        uint256 maxAmount = 5e18; // 5 WETH
+        hook.setMaxTradeGuard(wethPoolKey, maxAmount);
+
+        bool zeroForOne = (wethPoolKey.currency0 == currencyWETH);
+
+        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
+
+        // --- 1) Trade slightly below the limit: should pass ---
+        uint256 safeAmountIn = 4e18;
+
+        weth.mint(address(this), safeAmountIn);
+        weth.approve(address(manager), safeAmountIn);
+
+        SwapParams memory paramsSafe = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(safeAmountIn),
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+
+        swapRouter.swap(wethPoolKey, paramsSafe, settings, bytes(""));
+
+        // --- 2) Trade above the limit: should revert with "Max Trade" ---
+        uint256 tooLargeAmountIn = 6e18;
+
+        weth.mint(address(this), tooLargeAmountIn);
+        weth.approve(address(manager), tooLargeAmountIn);
+
+        SwapParams memory paramsTooLarge = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(tooLargeAmountIn),
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+
+        vm.expectRevert();
+        swapRouter.swap(wethPoolKey, paramsTooLarge, settings, bytes(""));
+    }
+
+    // Toxic Flow Guard
+    function testToxicFlowGuard_BlocksTooManySameDirectionLargeTrades() public {
+        // Configure toxic flow for WETH/USDC
+        uint32 windowBlocks = 20;
+        uint8 maxSameDirLargeTrades = 2;
+        uint256 minLargeTradeAmount = 1e18; // 1 WETH
+
+        hook.setToxicFlowConfig(
+            wethPoolKey,
+            true, // enabled
+            windowBlocks,
+            maxSameDirLargeTrades,
+            minLargeTradeAmount
+        );
+
+        bool zeroForOne = (wethPoolKey.currency0 == currencyWETH);
+        uint256 largeAmountIn = 2e18; // 2 WETH, above minLargeTradeAmount
+
+        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
+
+        // Helper: do a single large swap in same direction
+        for (uint256 i = 0; i < 2; i++) {
+            weth.mint(address(this), largeAmountIn);
+            weth.approve(address(manager), largeAmountIn);
+
+            SwapParams memory params = SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(largeAmountIn),
+                sqrtPriceLimitX96: zeroForOne
+                    ? TickMath.MIN_SQRT_PRICE + 1
+                    : TickMath.MAX_SQRT_PRICE - 1
+            });
+
+            // First 2 large trades should pass
+            swapRouter.swap(wethPoolKey, params, settings, bytes(""));
+        }
+
+        // Third large trade in same direction, in same block window, should revert
+        weth.mint(address(this), largeAmountIn);
+        weth.approve(address(manager), largeAmountIn);
+
+        SwapParams memory paramsThird = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(largeAmountIn),
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+
+        vm.expectRevert();
+        swapRouter.swap(wethPoolKey, paramsThird, settings, bytes(""));
+    }
+
+    function testToxicFlowGuard_ResetsAfterWindowAndAllowsAlternatingDirections() public {
+        uint32 windowBlocks = 5;
+        uint8 maxSameDirLargeTrades = 2;
+        uint256 minLargeTradeAmount = 1e18;
+
+        hook.setToxicFlowConfig(
+            wethPoolKey,
+            true,
+            windowBlocks,
+            maxSameDirLargeTrades,
+            minLargeTradeAmount
+        );
+
+        // We'll use direction toggling by referencing poolKey.currency0
+        bool zeroForOne = (wethPoolKey.currency0 == currencyWETH);
+        bool oneForZero = !zeroForOne;
+        uint256 largeAmountIn = 2e18;
+
+        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
+
+        // --- Part 1: Alternating directions should never exceed sameDirCount ---
+        // Trade 1: direction A
+        weth.mint(address(this), largeAmountIn);
+        weth.approve(address(manager), largeAmountIn);
+        SwapParams memory paramsA1 = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(largeAmountIn),
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+        swapRouter.swap(wethPoolKey, paramsA1, settings, bytes(""));
+
+        // Trade 2: direction B (opposite)
+        weth.mint(address(this), largeAmountIn);
+        weth.approve(address(manager), largeAmountIn);
+        SwapParams memory paramsB1 = SwapParams({
+            zeroForOne: oneForZero,
+            amountSpecified: -int256(largeAmountIn),
+            sqrtPriceLimitX96: oneForZero
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+        swapRouter.swap(wethPoolKey, paramsB1, settings, bytes(""));
+
+        // Trade 3: direction A again, still within window
+        weth.mint(address(this), largeAmountIn);
+        weth.approve(address(manager), largeAmountIn);
+        SwapParams memory paramsA2 = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(largeAmountIn),
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+        // Should still pass because streak keeps resetting
+        swapRouter.swap(wethPoolKey, paramsA2, settings, bytes(""));
+
+        // --- Part 2: window reset ---
+        // Move beyond windowBlocks to force reset
+        vm.roll(block.number + windowBlocks + 1);
+
+        // New streak: 2 trades in same direction should pass
+        for (uint256 i = 0; i < 2; i++) {
+            weth.mint(address(this), largeAmountIn);
+            weth.approve(address(manager), largeAmountIn);
+            SwapParams memory params = SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(largeAmountIn),
+                sqrtPriceLimitX96: zeroForOne
+                    ? TickMath.MIN_SQRT_PRICE + 1
+                    : TickMath.MAX_SQRT_PRICE - 1
+            });
+            swapRouter.swap(wethPoolKey, params, settings, bytes(""));
+        }
+    }
 
 
 
