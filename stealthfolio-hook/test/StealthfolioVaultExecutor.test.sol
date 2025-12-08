@@ -204,8 +204,7 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
             address(vault),
             currencyUSDC,
             10, // rebalanceCooldown: 10 blocks
-            100, // rebalanceMaxDuration: 100 blocks
-            1e18 // maxExternalSwapAmount: 1e18
+            100 // rebalanceMaxDuration: 100 blocks
         );
 
 

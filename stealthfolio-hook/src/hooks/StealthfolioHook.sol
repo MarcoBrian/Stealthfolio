@@ -18,7 +18,7 @@ import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol"; 
 
-contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
+contract StealthfolioFHEHook is BaseHook, Ownable, ReentrancyGuard {
     using PoolIdLibrary for PoolKey;
     using CurrencyLibrary for Currency;
     using StateLibrary for IPoolManager;
@@ -59,7 +59,6 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
     struct HookConfig {
         uint32 rebalanceCooldown; // blocks between completed rebalances
         uint32 rebalanceMaxDuration; // max blocks a rebalance can stay "pending"
-        uint256 maxExternalSwapAmount; // max external swap size during rebalance (per swap)
         address vault;
     }
 
@@ -147,8 +146,7 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
         address indexed vault,
         Currency baseAsset,
         uint32 rebalanceCooldown,
-        uint32 rebalanceMaxDuration,
-        uint256 maxExternalSwapAmount
+        uint32 rebalanceMaxDuration
     );
 
     event StrategyPoolRegistered(
@@ -232,8 +230,7 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
         address _vault,
         Currency _baseAsset,
         uint32 _rebalanceCooldown,
-        uint32 _rebalanceMaxDuration,
-        uint256 _maxExternalSwapAmount
+        uint32 _rebalanceMaxDuration
     ) external onlyOwner {
         require(_vault != address(0), "VAULT_ZERO");
         require(
@@ -246,7 +243,6 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
         hookConfig = HookConfig({
             rebalanceCooldown: _rebalanceCooldown,
             rebalanceMaxDuration: _rebalanceMaxDuration,
-            maxExternalSwapAmount: _maxExternalSwapAmount,
             vault: _vault
         });
 
@@ -263,8 +259,7 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
             _vault,
             _baseAsset,
             _rebalanceCooldown,
-            _rebalanceMaxDuration,
-            _maxExternalSwapAmount
+            _rebalanceMaxDuration
         );
     }
 
@@ -531,9 +526,12 @@ contract StealthfolioHook is BaseHook, Ownable, ReentrancyGuard {
             _enforceVolBand(key); 
             // enforce private max trade 
             _enforceMaxTradeGuard(key, params); 
-            // enforce toxic flow guard 
-            _enforceToxicFlowGuard(key, params);
 
+            // Enforce toxic flow guard during rebalancing period
+            if (st.rebalancePending){
+                // enforce toxic flow guard 
+                _enforceToxicFlowGuard(key, params);
+            }
         }
 
         // If no rebalance happening, nothing special happens

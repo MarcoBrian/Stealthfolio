@@ -382,6 +382,16 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
         return (valueInBase1e18 * (10 ** tokenDecimals)) / priceInBase1e18;
     }
 
+    function _capToBalance(
+        Currency tokenCurrency,
+        uint256 desiredAmount
+    ) internal view returns (uint256) {
+        address token = Currency.unwrap(tokenCurrency);
+        uint256 bal = IERC20(token).balanceOf(address(this));
+        return desiredAmount > bal ? bal : desiredAmount;
+    }
+
+
     /**
      * @notice Computes the next batch swap using cached prices.
      */
@@ -425,22 +435,22 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
              uint256 priceBase = lastPriceInBase[baseAsset]; // probably 1e18
             uint8 baseDecimals = IERC20Metadata(Currency.unwrap(baseAsset)).decimals();
 
-            params.amountSpecified = _valueToTokenAmount(
+            uint256 rawAmount = _valueToTokenAmount(
                 batchValue,
                 priceBase,
                 baseDecimals
             );
+
+            params.amountSpecified = _capToBalance(baseAsset, rawAmount);
+
 
         } else {
             // dev < 0 → asset overweight → we SELL asset for base
             // need to convert target base-value batchValue into asset quantity
             uint8 assetDecimals = IERC20Metadata(Currency.unwrap(asset)).decimals();
 
-            params.amountSpecified = _valueToTokenAmount(
-                batchValue,
-                priceAsset,
-                assetDecimals
-            );
+            uint256 rawAmount = _valueToTokenAmount(batchValue, priceAsset, assetDecimals);
+            params.amountSpecified = _capToBalance(asset, rawAmount);
         }
     }
 
