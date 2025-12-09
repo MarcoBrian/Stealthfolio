@@ -100,7 +100,7 @@ contract StealthfolioFHEHook is BaseHook, Ownable, ReentrancyGuard {
         bool enabled; 
     }
 
-    mapping(PoolId => VolBand) internal volBands;
+    mapping(PoolId => VolBand) public volBands;
 
     // Max Trade guards to prevent big price changes and manipulation
     struct MaxTradeGuard {
@@ -180,7 +180,7 @@ contract StealthfolioFHEHook is BaseHook, Ownable, ReentrancyGuard {
     // ========= Admin: hook config =========
 
     // Set volatility band 
-    function setVolBand(PoolKey  calldata key, 
+    function setEncryptedVolBand(PoolKey  calldata key, 
                 InEuint256 calldata encCenterSqrtPriceX96,
                 InEuint32  calldata encWidthBps) external onlyOwner {
         PoolId poolId = key.toId(); 
@@ -287,7 +287,7 @@ contract StealthfolioFHEHook is BaseHook, Ownable, ReentrancyGuard {
     }
 
     // Set Toxic Flow Configuration
-    function setToxicFlowConfig(
+    function setEncryptedToxicFlowConfig(
         PoolKey calldata key,
         InEuint32  calldata _encWindowBlocks,
         InEuint32  calldata _encMaxSameDirLargeTrades,
