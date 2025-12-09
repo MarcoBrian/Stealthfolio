@@ -18,6 +18,7 @@ import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol"; 
 
+// Fhenix Imports
 import {FHE,
     InEuint128,
     InEuint256,

@@ -130,6 +130,7 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
     ) external onlyOwner {
         require(assets.length == bps.length, "ASSETS_BPS_LEN");
         require(Currency.unwrap(baseAsset) != address(0), "BASE_ZERO");
+        require(assets.length > 0, "NO_ASSETS"); 
 
         delete portfolioAssets;
 

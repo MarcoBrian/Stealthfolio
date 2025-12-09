@@ -28,8 +28,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {CalculatePrice} from "../../src/utils/CalculatePrice.sol";
 
 // Fhenix imports
-
-import {FHE, InEuint128, InEuint256, InEuint32, euint128, euint256, euint32} from "@fhenixprotocol/cofhe-contracts/FHE.sol";
+import {FHE, InEuint128, InEuint256, InEuint32,InEuint16, euint128, euint256, euint32,euint16} from "@fhenixprotocol/cofhe-contracts/FHE.sol";
 import {CoFheTest} from "@fhenixprotocol/cofhe-mock-contracts/CoFheTest.sol";
 
 import "forge-std/console.sol";
@@ -54,6 +53,9 @@ contract StealthfolioVaultHarnessFHE is StealthfolioVaultFHE {
     {
         return _updatePrices();
     }
+
+
+
 }
 
 contract StealthfolioFHEHookTest is Test, CoFheTest, Deployers {
@@ -325,11 +327,34 @@ contract StealthfolioFHEHookTest is Test, CoFheTest, Deployers {
             bytes("")
         );
 
-        // Configure vault
-        vault.configureStrategy(
-            100, // minDriftBps: 1%
-            2500, // batchSizeBps: 25% per batch
-            1 // minDriftCheckInterval: 1 block
+        
+        // Configure encrypted strategy for the vault 
+        uint32 minDriftBps = 100;        // 1%
+        uint32 batchSizeBps = 2_500;     // 25%
+        uint32 minDriftCheckInterval = 1;
+
+
+
+        InEuint32 memory _encMinDriftBps = createInEuint32(
+            minDriftBps,
+            address(this)
+        );
+
+        InEuint32 memory _encBatchSizeBps = createInEuint32(
+            batchSizeBps,
+            address(this)
+        );
+
+        InEuint32 memory _encMinDriftCheckInterval = createInEuint32(
+            minDriftCheckInterval,
+            address(this)
+        );
+
+        // Configure strategy on harness with USDC as base asset
+        vault.configureEncryptedStrategy(
+            _encMinDriftBps, // minDriftBps: 1%
+            _encBatchSizeBps, // batchSizeBps: 25%
+            _encMinDriftCheckInterval // minDriftCheckInterval: 1 block
         );
 
         // Set portfolio targets: 50% USDC, 30% WBTC, 20% WETH
@@ -339,16 +364,27 @@ contract StealthfolioFHEHookTest is Test, CoFheTest, Deployers {
         assets[2] = currencyWETH;
 
         uint16[] memory bps = new uint16[](3);
-        bps[0] = 5000; // 50% USDC
-        bps[1] = 3000; // 30% WBTC
-        bps[2] = 2000; // 20% WETH
+        bps[0] = 5_000; // 50% USDC
+        bps[1] = 3_000; // 30% WBTC
+        bps[2] = 2_000; // 20% WETH
 
-        vault.setPortfolioTargets(assets, bps);
+        InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
 
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+        
+
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
         // Set price feeds
         vault.setPriceFeed(currencyUSDC, address(usdcFeed));
         vault.setPriceFeed(currencyWBTC, address(wbtcFeed));
         vault.setPriceFeed(currencyWETH, address(wethFeed));
+
+
+        // Time fast forward to let the decryption finish
+        vm.warp(block.timestamp + 10);
     }
 
     // ======= Test Hook BeforeSwap functionalities with Fhenix encrypted guardrails ==============
