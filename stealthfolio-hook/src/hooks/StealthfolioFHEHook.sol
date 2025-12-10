@@ -261,6 +261,7 @@ contract StealthfolioFHEHook is BaseHook, Ownable, ReentrancyGuard {
             Currency.unwrap(baseAsset) == address(0) || baseAsset == _baseAsset,
             "BASE_ALREADY_SET"
         );
+        require(Currency.unwrap(_baseAsset) != address(0), "BASE_ASSET_ZERO");
 
         baseAsset = _baseAsset;
 

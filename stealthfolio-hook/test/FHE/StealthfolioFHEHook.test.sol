@@ -2,34 +2,38 @@
 pragma solidity ^0.8.0;
 import {Test} from "forge-std/Test.sol";
 
+
+import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {MockV3Aggregator} from "@chainlink/local/src/data-feeds/MockV3Aggregator.sol";
+
+// Uniswap v4 Imports
 import {Deployers} from "@uniswap/v4-core/test/utils/Deployers.sol";
 import {PoolSwapTest} from "v4-core/test/PoolSwapTest.sol";
-import {MockERC20} from "solmate/src/test/utils/mocks/MockERC20.sol";
 import {FixedPointMathLib} from "solmate/src/utils/FixedPointMathLib.sol";
-
 import {PoolManager} from "v4-core/PoolManager.sol";
 import {SwapParams, ModifyLiquidityParams} from "v4-core/types/PoolOperation.sol";
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
-
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {PoolId, PoolIdLibrary} from "v4-core/types/PoolId.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
 import {StateLibrary} from "v4-core/libraries/StateLibrary.sol";
-
 import {Hooks} from "v4-core/libraries/Hooks.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
-import {StealthfolioFHEHook} from "../../src/hooks/StealthfolioFHEHook.sol";
-import {StealthfolioVaultFHE} from "../../src/StealthfolioVaultExecutorFHE.sol";
-import {MockV3Aggregator} from "@chainlink/local/src/data-feeds/MockV3Aggregator.sol";
-import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
+// Custom contracts
 import {CalculatePrice} from "../../src/utils/CalculatePrice.sol";
 
 // Fhenix imports
 import {FHE, InEuint128, InEuint256, InEuint32,InEuint16, euint128, euint256, euint32,euint16} from "@fhenixprotocol/cofhe-contracts/FHE.sol";
 import {CoFheTest} from "@fhenixprotocol/cofhe-mock-contracts/CoFheTest.sol";
+
+// Contracts to test
+import {StealthfolioFHEHook} from "../../src/hooks/StealthfolioFHEHook.sol";
+import {StealthfolioVaultFHE} from "../../src/StealthfolioVaultExecutorFHE.sol";
 
 import "forge-std/console.sol";
 

@@ -76,11 +76,15 @@ contract StealthfolioVaultHarnessFHE is StealthfolioVaultFHE {
     }
 
     /// @dev Test-only helper to findMaxDeviation 
-    function findMaxDeviationHarness(uint256 totalValue, uint256[] memory values) external returns (
+    function findMaxDeviationHarness() external returns (
         Currency maxAsset, uint256 maxAbsDev
     ) {
-       
-
+        (uint256 totalValue, uint256[] memory values) = _updatePrices();
+        console.log("Total Value:", totalValue ); 
+        for (uint256 i =0; i < values.length; i++){
+            console.log("Values ", i , ":", values[i]); 
+        }
+        
         return _findMaxDeviation(totalValue, values); 
 
     }
@@ -405,6 +409,10 @@ contract StealthfolioVaultExecutorFHETest is Test, CoFheTest, Deployers {
         usdc.mint(address(vault), 500_000e6); // 500k USDC
         wbtc.mint(address(vault), 5e8); // 5 WBTC
         weth.mint(address(vault), 50e18); // 50 WETH
+
+
+        // Time fast forward to let the decryption finish
+        vm.warp(block.timestamp + 10);
     }
 
 
@@ -490,60 +498,65 @@ contract StealthfolioVaultExecutorFHETest is Test, CoFheTest, Deployers {
     // // ======================
 
 
-    // function testSetPortfolioTargets_RevertsIfTotalBpsNot10000() public {
-    //     // Configure strategy to set baseAsset (required before setPortfolioTargets)
-    //     vault.configureStrategyHarness(
-    //         currencyUSDC, // baseAsset
-    //         100, // minDriftBps
-    //         2_500, // batchSizeBps
-    //         1 // minDriftCheckInterval
-    //     );
+    function testSetPortfolioTargets_RevertsIfTotalBpsNot10000() public {
+        
 
-    //     // Set portfolio targets with invalid total: 50% USDC, 30% WBTC, 25% WETH = 10,500 bps (should be 10,000)
-    //     Currency[] memory assets = new Currency[](3);
-    //     assets[0] = currencyUSDC;
-    //     assets[1] = currencyWBTC;
-    //     assets[2] = currencyWETH;
+        // Set portfolio targets with invalid total: 50% USDC, 30% WBTC, 25% WETH = 10,500 bps (should be 10,000)
+        Currency[] memory assets = new Currency[](3);
+        assets[0] = currencyUSDC;
+        assets[1] = currencyWBTC;
+        assets[2] = currencyWETH;
 
-    //     uint16[] memory bps = new uint16[](3);
-    //     bps[0] = 5_000; // 50% USDC
-    //     bps[1] = 3_000; // 30% WBTC
-    //     bps[2] = 2_500; // 25% WETH (total = 10,500, not 10,000)
+        uint16[] memory bps = new uint16[](3);
+        bps[0] = 5_000; // 50% USDC
+        bps[1] = 3_000; // 30% WBTC
+        bps[2] = 2_500; // 25% WETH (total = 10,500, not 10,000)
 
-    //     vm.expectRevert("TOTAL_BPS_NEQ_100");
-    //     vault.setPortfolioTargets(assets, bps);
-    // }
+        InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
 
-    // function testSetPortfolioTargets_RevertsIfBaseNotInPortfolio() public {
-    //     // Configure strategy with USDC as baseAsset
-    //     vault.configureStrategyHarness(
-    //         currencyUSDC, // baseAsset
-    //         100,
-    //         2_500,
-    //         1
-    //     );
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
 
-    //     // Set portfolio targets without baseAsset (only WBTC and WETH)
-    //     Currency[] memory assets = new Currency[](2);
-    //     assets[0] = currencyWBTC;
-    //     assets[1] = currencyWETH;
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
 
-    //     uint16[] memory bps = new uint16[](2);
-    //     bps[0] = 5_000; // 50% WBTC
-    //     bps[1] = 5_000; // 50% WETH
+        // Time fast forward to let the decryption finish
+        vm.warp(block.timestamp + 5);
 
-    //     vm.expectRevert("BASE_NOT_IN_PORTFOLIO");
-    //     vault.setPortfolioTargets(assets, bps);
-    // }
+        vm.expectRevert("TOTAL_BPS_NEQ_100");
+        vault.rebalanceStep(); 
+        
 
+
+
+    }
+
+    function testSetPortfolioTargets_RevertsIfBaseNotInPortfolio() public {
+        
+        // Set portfolio targets without baseAsset (only WBTC and WETH)
+        Currency[] memory assets = new Currency[](2);
+        assets[0] = currencyWBTC;
+        assets[1] = currencyWETH;
+
+        uint16[] memory bps = new uint16[](2);
+        bps[0] = 5_000; // 50% WBTC
+        bps[1] = 5_000; // 50% WETH
+
+        InEuint16[] memory encryptedBpsInputs = new InEuint16[](2); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+
+        vm.expectRevert("BASE_NOT_IN_PORTFOLIO");
+
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
+    }
+
+    // Remove this test since we cannot check BPS zero for encrypted
     // function testSetPortfolioTargets_RevertsIfBpsZero() public {
-    //     // Configure strategy to set baseAsset
-    //     vault.configureStrategyHarness(
-    //         currencyUSDC,
-    //         100,
-    //         2_500,
-    //         1
-    //     );
 
     //     // Set portfolio targets with zero BPS for one asset
     //     Currency[] memory assets = new Currency[](3);
@@ -556,65 +569,71 @@ contract StealthfolioVaultExecutorFHETest is Test, CoFheTest, Deployers {
     //     bps[1] = 0; // 0% WBTC (should revert)
     //     bps[2] = 5_000; // 50% WETH
 
+    //     InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
+
+    //     for (uint16 i = 0; i < bps.length; i++){
+    //         InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+    //         encryptedBpsInputs[i] = _encBps; 
+    //     }
+
     //     vm.expectRevert("BPS_ZERO");
-    //     vault.setPortfolioTargets(assets, bps);
+    //     vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
     // }
 
-    // function testSetPortfolioTargets_RevertsIfAssetZero() public {
-    //     // Configure strategy to set baseAsset
-    //     vault.configureStrategyHarness(
-    //         currencyUSDC,
-    //         100,
-    //         2_500,
-    //         1
-    //     );
+    function testSetPortfolioTargets_RevertsIfAssetZero() public {
+        
+        // Set portfolio targets with zero address for one asset
+        Currency[] memory assets = new Currency[](3);
+        assets[0] = currencyUSDC;
+        assets[1] = Currency.wrap(address(0)); // Zero address (should revert)
+        assets[2] = currencyWETH;
 
-    //     // Set portfolio targets with zero address for one asset
-    //     Currency[] memory assets = new Currency[](3);
-    //     assets[0] = currencyUSDC;
-    //     assets[1] = Currency.wrap(address(0)); // Zero address (should revert)
-    //     assets[2] = currencyWETH;
+        uint16[] memory bps = new uint16[](3);
+        bps[0] = 5_000; // 50% USDC
+        bps[1] = 2_500; // 25% (invalid asset)
+        bps[2] = 2_500; // 25% WETH
 
-    //     uint16[] memory bps = new uint16[](3);
-    //     bps[0] = 5_000; // 50% USDC
-    //     bps[1] = 2_500; // 25% (invalid asset)
-    //     bps[2] = 2_500; // 25% WETH
+        InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
 
-    //     vm.expectRevert("ASSET_ZERO");
-    //     vault.setPortfolioTargets(assets, bps);
-    // }
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
 
-    // function testSetPortfolioTargets_RevertsIfArraysLengthMismatch() public {
-    //     // Configure strategy to set baseAsset
-    //     vault.configureStrategyHarness(
-    //         currencyUSDC,
-    //         100,
-    //         2_500,
-    //         1
-    //     );
+        vm.expectRevert("ASSET_ZERO");
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
+    }
 
-    //     // Set portfolio targets with mismatched array lengths
-    //     Currency[] memory assets = new Currency[](3);
-    //     assets[0] = currencyUSDC;
-    //     assets[1] = currencyWBTC;
-    //     assets[2] = currencyWETH;
+    function testSetPortfolioTargets_RevertsIfArraysLengthMismatch() public {
+        // Set portfolio targets with mismatched array lengths
+        Currency[] memory assets = new Currency[](3);
+        assets[0] = currencyUSDC;
+        assets[1] = currencyWBTC;
+        assets[2] = currencyWETH;
 
-    //     uint16[] memory bps = new uint16[](2); // Only 2 BPS values for 3 assets
-    //     bps[0] = 5_000;
-    //     bps[1] = 5_000;
+        uint16[] memory bps = new uint16[](2); // Only 2 BPS values for 3 assets
+        bps[0] = 5_000;
+        bps[1] = 5_000;
 
-    //     vm.expectRevert("ASSETS_BPS_LEN");
-    //     vault.setPortfolioTargets(assets, bps);
-    // }
+         InEuint16[] memory encryptedBpsInputs = new InEuint16[](2); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+
+        vm.expectRevert("ASSETS_BPS_LEN");
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
+    }
 
 
     // // ======= Test functions functionality =========
 
-    // function test_findMaxDeviation() public {
-    //     (Currency maxAsset, uint256 maxAbsDev) = vault.findMaxDeviationHarness(); 
-    //     console.log("MaxAsset:", MockERC20(Currency.unwrap(maxAsset)).symbol()); 
-    //     console.log("MaxAbsDev (USD):", maxAbsDev / 1e18 ); 
-    // }
+    function test_findMaxDeviation() public {
+        (Currency maxAsset, uint256 maxAbsDev) = vault.findMaxDeviationHarness(); 
+        console.log("MaxAsset:", MockERC20(Currency.unwrap(maxAsset)).symbol()); 
+        console.log("MaxAbsDev (USD):", maxAbsDev / 1e18 ); 
+    }
 
 
     // // ======================
@@ -622,498 +641,574 @@ contract StealthfolioVaultExecutorFHETest is Test, CoFheTest, Deployers {
     // // ======================
     
     
-    // function testComputeSwapDirection_AssetIsToken0_DevPositive_BuysAsset() public {
-    //      Currency asset = currencyWBTC;
-    //     PoolKey memory key = PoolKey({
-    //         currency0: asset,          // WBTC
-    //         currency1: currencyUSDC,   // USDC
-    //         fee: 3000,
-    //         tickSpacing: 60,
-    //         hooks: IHooks(address(hook))
-    //     });
+    function testComputeSwapDirection_AssetIsToken0_DevPositive_BuysAsset() public {
+        Currency asset = currencyWBTC;
+        PoolKey memory key = PoolKey({
+            currency0: asset,          // WBTC
+            currency1: currencyUSDC,   // USDC
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(hook))
+        });
 
 
-    //     // dev > 0 => asset underweight => we BUY asset with base
-    //     int256 dev = int256(1);
+        // dev > 0 => asset underweight => we BUY asset with base
+        int256 dev = int256(1);
 
-    //     bool zeroForOne = vault.computeSwapDirectionHarness(asset, key, dev);
+        bool zeroForOne = vault.computeSwapDirectionHarness(asset, key, dev);
 
-    //     // When asset is token0 and dev > 0, we expect:
-    //     // zeroForOne = false (pay token1 (USDC), receive token0 (WBTC))
-    //     assertFalse(zeroForOne, "asset underweight & token0 => should buy asset (zeroForOne=false)");
-
-       
-    // }
-    
-    // function testComputeSwapDirection_AssetIsToken0_DevNegative_SellsAsset() public {
-    //     Currency asset = currencyWBTC;
-    //     PoolKey memory key = PoolKey({
-    //         currency0: asset,
-    //         currency1: currencyUSDC,
-    //         fee: 3000,
-    //         tickSpacing: 60,
-    //         hooks: IHooks(address(hook))
-    //     });
-
-    //     // dev < 0 => asset overweight => we SELL asset for base
-    //     int256 dev = -1;
-
-    //     bool zeroForOne = vault.computeSwapDirectionHarness(asset, key, dev);
-
-    //     // asset is token0, dev < 0 => zeroForOne = true (pay token0, receive token1)
-    //     assertTrue(zeroForOne, "asset overweight & token0 => should sell asset (zeroForOne=true)");
-    // }
-    
-    // function testComputeSwapDirection_AssetIsToken1_DevPositive_BuysAsset() public {
-    //   Currency asset = currencyWBTC;
-    //     PoolKey memory key = PoolKey({
-    //         currency0: currencyUSDC, //USDC
-    //         currency1: asset,   // WBTC
-    //         fee: 3000,
-    //         tickSpacing: 60,
-    //         hooks: IHooks(address(hook))
-    //     });
-
-
-    //     // dev > 0 => asset underweight => we BUY asset with base
-    //     int256 dev = int256(1);
-
-    //     bool zeroForOne = vault.computeSwapDirectionHarness(asset, key, dev);
-
-    //     // When asset is token1 and dev > 0, we expect:
-    //     // zeroForOne = true (pay token1 (USDC), receive token0 (WBTC))
-    //     assertTrue(zeroForOne, "asset underweight & token1 => should buy asset (zeroForOne=true)");
+        // When asset is token0 and dev > 0, we expect:
+        // zeroForOne = false (pay token1 (USDC), receive token0 (WBTC))
+        assertFalse(zeroForOne, "asset underweight & token0 => should buy asset (zeroForOne=false)");
 
        
-    // }
+    }
     
-    // function testComputeSwapDirection_AssetIsToken1_DevNegative_SellsAsset() public {
-    //     Currency asset = currencyWBTC;
-    //     PoolKey memory key = PoolKey({
-    //         currency0: currencyUSDC, //USDC
-    //         currency1: asset,   // WBTC
-    //         fee: 3000,
-    //         tickSpacing: 60,
-    //         hooks: IHooks(address(hook))
-    //     });
+    function testComputeSwapDirection_AssetIsToken0_DevNegative_SellsAsset() public {
+        Currency asset = currencyWBTC;
+        PoolKey memory key = PoolKey({
+            currency0: asset,
+            currency1: currencyUSDC,
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(hook))
+        });
+
+        // dev < 0 => asset overweight => we SELL asset for base
+        int256 dev = -1;
+
+        bool zeroForOne = vault.computeSwapDirectionHarness(asset, key, dev);
+
+        // asset is token0, dev < 0 => zeroForOne = true (pay token0, receive token1)
+        assertTrue(zeroForOne, "asset overweight & token0 => should sell asset (zeroForOne=true)");
+    }
+    
+    function testComputeSwapDirection_AssetIsToken1_DevPositive_BuysAsset() public {
+      Currency asset = currencyWBTC;
+        PoolKey memory key = PoolKey({
+            currency0: currencyUSDC, //USDC
+            currency1: asset,   // WBTC
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(hook))
+        });
 
 
-    //     // dev < 0 => asset overweight => we SELL asset
-    //     int256 dev = int256(-1);
+        // dev > 0 => asset underweight => we BUY asset with base
+        int256 dev = int256(1);
 
-    //     bool zeroForOne = vault.computeSwapDirectionHarness(asset, key, dev);
-    //     assertFalse(zeroForOne, "asset overweight & token1 => should sell asset (zeroForOne=False)");
+        bool zeroForOne = vault.computeSwapDirectionHarness(asset, key, dev);
 
-    // }
+        // When asset is token1 and dev > 0, we expect:
+        // zeroForOne = true (pay token1 (USDC), receive token0 (WBTC))
+        assertTrue(zeroForOne, "asset underweight & token1 => should buy asset (zeroForOne=true)");
 
-    // // ====== AmountSpecified Scaling Tests ============
-    // function testComputeBatchParams_OverweightWBTC_AmountSpecifiedUsesWBTCBalance() public {
-    //      // --- Arrange: make WBTC strongly overweight vs target ---
-    //     // - baseAsset = USDC
-    //     // - portfolioAssets = [USDC, WBTC, WETH]
-    //     // - targetAllocBps for each
+       
+    }
+    
+    function testComputeSwapDirection_AssetIsToken1_DevNegative_SellsAsset() public {
+        Currency asset = currencyWBTC;
+        PoolKey memory key = PoolKey({
+            currency0: currencyUSDC, //USDC
+            currency1: asset,   // WBTC
+            fee: 3000,
+            tickSpacing: 60,
+            hooks: IHooks(address(hook))
+        });
 
-    //     // Push WBTC value way up so its share is > target share.
-    //     wbtcFeed.updateAnswer(200_000e8);   // 1 WBTC = 200,000 USDC
-    //     wethFeed.updateAnswer(1_000e8);     // 1 WETH = 1,000 USDC
-    //     usdcFeed.updateAnswer(1e8);         // 1 USDC = 1 USDC
 
-    //     // Update prices & compute drift; this will also set strategyState.targetAsset
-    //     StealthfolioVaultFHE.DriftResult memory drift =
-    //         vault.updatePricesAndCheckDriftHarness();
+        // dev < 0 => asset overweight => we SELL asset
+        int256 dev = int256(-1);
 
-    //     // We expect:
-    //     // - drift.shouldRebalance == true
-    //     // - targetAsset == WBTC, because WBTC is now overweight
-    //     assertTrue(drift.shouldRebalance, "shouldRebalance must be true");
-    //     assertEq(
-    //         Currency.unwrap(drift.targetAsset),
-    //         address(wbtc),
-    //         "WBTC should be selected as targetAsset for rebalance"
-    //     );
+        bool zeroForOne = vault.computeSwapDirectionHarness(asset, key, dev);
+        assertFalse(zeroForOne, "asset overweight & token1 => should sell asset (zeroForOne=False)");
 
-    //     // --- Act: compute batch params from strategy state and cached prices ---
+    }
 
-    //     StealthfolioVaultFHE.BatchParams memory params =
-    //         vault.computeBatchParamsHarness();
+    // ====== AmountSpecified Scaling Tests ============
+    function testComputeBatchParams_OverweightWBTC_AmountSpecifiedUsesWBTCBalance() public {
+         // --- Arrange: make WBTC strongly overweight vs target ---
+        // - baseAsset = USDC
+        // - portfolioAssets = [USDC, WBTC, WETH]
+        // - targetAllocBps for each
 
-    //     // --- Assert: direction + amount semantics ---
+        // Push WBTC value way up so its share is > target share.
+        wbtcFeed.updateAnswer(200_000e8);   // 1 WBTC = 200,000 USDC
+        wethFeed.updateAnswer(1_000e8);     // 1 WETH = 1,000 USDC
+        usdcFeed.updateAnswer(1e8);         // 1 USDC = 1 USDC
 
-    //     // Because WBTC is overweight, we should be SELLING WBTC for base
-    //     // => input token must be WBTC, so amountSpecified is in WBTC units.
-    //     // For an overweight asset:
-    //     //  - if asset is token0 → zeroForOne == true, input is token0 (asset)
-    //     //  - if asset is token1 → zeroForOne == false, input is token1 (asset)
+        // Update prices & compute drift; this will also set strategyState.targetAsset
+        StealthfolioVaultFHE.DriftResult memory drift =
+            vault.updatePricesAndCheckDriftHarness();
 
-    //     Currency asset = drift.targetAsset;
-    //     bool assetIsToken0 = (asset == params.poolKey.currency0);
+        // We expect:
+        // - drift.shouldRebalance == true
+        // - targetAsset == WBTC, because WBTC is now overweight
+        assertTrue(drift.shouldRebalance, "shouldRebalance must be true");
+        assertEq(
+            Currency.unwrap(drift.targetAsset),
+            address(wbtc),
+            "WBTC should be selected as targetAsset for rebalance"
+        );
 
-    //     if (assetIsToken0) {
-    //         // WBTC is token0, overweight => SELL token0 → token1
-    //         assertTrue(params.zeroForOne, "asset token0 overweight, zeroForOne must be true");
-    //     } else {
-    //         // WBTC is token1, overweight => SELL token1 → token0
-    //         assertFalse(params.zeroForOne, "asset token1 overweight, zeroForOne must be false");
-    //     }
+        // --- Act: compute batch params from strategy state and cached prices ---
 
-    //     // And we should NEVER try to sell more WBTC than the vault actually has.
-    //     uint256 wbtcBal = wbtc.balanceOf(address(vault));
-    //     assertLe(
-    //         params.amountSpecified,
-    //         wbtcBal,
-    //         "amountSpecified should not exceed vault WBTC balance"
-    //     );
+        StealthfolioVaultFHE.BatchParams memory params =
+            vault.computeBatchParamsHarness();
 
-    //     // Optional: sanity check that we are actually moving a non-zero amount.
-    //     assertGt(params.amountSpecified, 0, "amountSpecified should be > 0 for overweight WBTC");
+        // --- Assert: direction + amount semantics ---
+
+        // Because WBTC is overweight, we should be SELLING WBTC for base
+        // => input token must be WBTC, so amountSpecified is in WBTC units.
+        // For an overweight asset:
+        //  - if asset is token0 → zeroForOne == true, input is token0 (asset)
+        //  - if asset is token1 → zeroForOne == false, input is token1 (asset)
+
+        Currency asset = drift.targetAsset;
+        bool assetIsToken0 = (asset == params.poolKey.currency0);
+
+        if (assetIsToken0) {
+            // WBTC is token0, overweight => SELL token0 → token1
+            assertTrue(params.zeroForOne, "asset token0 overweight, zeroForOne must be true");
+        } else {
+            // WBTC is token1, overweight => SELL token1 → token0
+            assertFalse(params.zeroForOne, "asset token1 overweight, zeroForOne must be false");
+        }
+
+        // And we should NEVER try to sell more WBTC than the vault actually has.
+        uint256 wbtcBal = wbtc.balanceOf(address(vault));
+        assertLe(
+            params.amountSpecified,
+            wbtcBal,
+            "amountSpecified should not exceed vault WBTC balance"
+        );
+
+        // Optional: sanity check that we are actually moving a non-zero amount.
+        assertGt(params.amountSpecified, 0, "amountSpecified should be > 0 for overweight WBTC");
             
-    // }
+    }
 
-    // function  testComputeBatchParams_AssetUnderweight_AmountSpecifiedUsesBaseBalance() public {
-    //     // --- Arrange: make WBTC underweight vs target ---
+    function  testComputeBatchParams_AssetUnderweight_AmountSpecifiedUsesBaseBalance() public {
+        // --- Arrange: make WBTC underweight vs target ---
 
-    //     // Make WBTC cheap and USDC/WETH relatively more valuable,
-    //     // so WBTC's share of total value is below its target.
-    //     wbtcFeed.updateAnswer(1_000e8);     // 1 WBTC = 1,000 USDC
-    //     wethFeed.updateAnswer(3_000e8);     // 1 WETH = 3,000 USDC
-    //     usdcFeed.updateAnswer(1e8);         // 1 USDC = 1 USDC
+        // Make WBTC cheap and USDC/WETH relatively more valuable,
+        // so WBTC's share of total value is below its target.
+        wbtcFeed.updateAnswer(1_000e8);     // 1 WBTC = 1,000 USDC
+        wethFeed.updateAnswer(3_000e8);     // 1 WETH = 3,000 USDC
+        usdcFeed.updateAnswer(1e8);         // 1 USDC = 1 USDC
 
-    //     // Recompute drift
-    //     StealthfolioVaultFHE.DriftResult memory drift =
-    //         vault.updatePricesAndCheckDriftHarness();
+        // Recompute drift
+        StealthfolioVaultFHE.DriftResult memory drift =
+            vault.updatePricesAndCheckDriftHarness();
 
-    //     // We expect a rebalance, with WBTC as the underweight asset
-    //     assertTrue(drift.shouldRebalance, "shouldRebalance must be true");
-    //     assertEq(
-    //         Currency.unwrap(drift.targetAsset),
-    //         address(wbtc),
-    //         "WBTC should be targetAsset (underweight)"
-    //     );
+        // We expect a rebalance, with WBTC as the underweight asset
+        assertTrue(drift.shouldRebalance, "shouldRebalance must be true");
+        assertEq(
+            Currency.unwrap(drift.targetAsset),
+            address(wbtc),
+            "WBTC should be targetAsset (underweight)"
+        );
 
-    //     // --- Act: compute batch params ---
+        // --- Act: compute batch params ---
 
-    //     StealthfolioVaultFHE.BatchParams memory params =
-    //         vault.computeBatchParamsHarness();
+        StealthfolioVaultFHE.BatchParams memory params =
+            vault.computeBatchParamsHarness();
 
-    //     // --- Assert: direction + amount semantics ---
+        // --- Assert: direction + amount semantics ---
 
-    //     // Underweight asset => BUY asset with base
-    //     // So input token must be baseAsset (USDC).
-    //     Currency base = vault.baseAsset();
-    //     Currency asset = drift.targetAsset;
-    //     bool assetIsToken0 = (asset == params.poolKey.currency0);
+        // Underweight asset => BUY asset with base
+        // So input token must be baseAsset (USDC).
+        Currency base = vault.baseAsset();
+        Currency asset = drift.targetAsset;
+        bool assetIsToken0 = (asset == params.poolKey.currency0);
 
-    //     // Our swap direction logic says:
-    //     //  - dev > 0 (underweight)
-    //     //  - if assetIsToken0 → zeroForOne = false → token1 (base) → token0 (asset)
-    //     //  - if assetIsToken1 → zeroForOne = true  → token0 (base) → token1 (asset)
-    //     if (assetIsToken0) {
-    //         assertFalse(
-    //             params.zeroForOne,
-    //             "asset token0 underweight, zeroForOne must be false (base -> asset)"
-    //         );
-    //         // zeroForOne = false: input is token1, so token1 must be base
-    //         assertEq(
-    //             Currency.unwrap(params.poolKey.currency1),
-    //             Currency.unwrap(base),
-    //             "token1 must be base asset when buying asset token0"
-    //         );
-    //     } else {
-    //         assertTrue(
-    //             params.zeroForOne,
-    //             "asset token1 underweight => zeroForOne must be true (base => asset)"
-    //         );
-    //         // zeroForOne = true: input is token0, so token0 must be base
-    //         assertEq(
-    //             Currency.unwrap(params.poolKey.currency0),
-    //             Currency.unwrap(base),
-    //             "token0 must be base asset when buying asset token1"
-    //         );
-    //     }
+        // Our swap direction logic says:
+        //  - dev > 0 (underweight)
+        //  - if assetIsToken0 → zeroForOne = false → token1 (base) → token0 (asset)
+        //  - if assetIsToken1 → zeroForOne = true  → token0 (base) → token1 (asset)
+        if (assetIsToken0) {
+            assertFalse(
+                params.zeroForOne,
+                "asset token0 underweight, zeroForOne must be false (base -> asset)"
+            );
+            // zeroForOne = false: input is token1, so token1 must be base
+            assertEq(
+                Currency.unwrap(params.poolKey.currency1),
+                Currency.unwrap(base),
+                "token1 must be base asset when buying asset token0"
+            );
+        } else {
+            assertTrue(
+                params.zeroForOne,
+                "asset token1 underweight => zeroForOne must be true (base => asset)"
+            );
+            // zeroForOne = true: input is token0, so token0 must be base
+            assertEq(
+                Currency.unwrap(params.poolKey.currency0),
+                Currency.unwrap(base),
+                "token0 must be base asset when buying asset token1"
+            );
+        }
 
-    //     // And the batch size must not exceed available base balance.
-    //     uint256 baseBal = IERC20(Currency.unwrap(base)).balanceOf(address(vault));
-    //     assertLe(
-    //         params.amountSpecified,
-    //         baseBal,
-    //         "amountSpecified should not exceed vault base balance"
-    //     );
+        // And the batch size must not exceed available base balance.
+        uint256 baseBal = IERC20(Currency.unwrap(base)).balanceOf(address(vault));
+        assertLe(
+            params.amountSpecified,
+            baseBal,
+            "amountSpecified should not exceed vault base balance"
+        );
 
-    //     assertGt(
-    //         params.amountSpecified,
-    //         0,
-    //         "amountSpecified should be > 0 when asset is underweight"
-    //     );
-    // }
+        assertGt(
+            params.amountSpecified,
+            0,
+            "amountSpecified should be > 0 when asset is underweight"
+        );
+    }
     
 
-    // function testComputeBatchParams_ZeroDeviation_ReturnsZeroAmount() public {
-    //     // --- Arrange: configure a single-asset portfolio = 100% baseAsset ---
+    function testComputeBatchParams_ZeroDeviation_ReturnsZeroAmount() public {
+        // --- Arrange: configure a single-asset portfolio = 100% baseAsset ---
 
-    //     Currency base = currencyUSDC; // assuming you have this in your test setUp
+        Currency base = currencyUSDC; // assuming you have this in your test setUp
 
-    //     // Override portfolio to [base] with 100% allocation
-    //     Currency[] memory assets = new Currency[](1);
-    //     assets[0] = base;
+        // Override portfolio to [base] with 100% allocation
+        Currency[] memory assets = new Currency[](1);
+        assets[0] = base;
 
-    //     uint16[] memory bps = new uint16[](1); 
-    //     bps[0] = 10_000; // 100%
+        uint16[] memory bps = new uint16[](1); 
+        bps[0] = 10_000; // 100%
 
-    //     // Need to be owner in tests
-    //     vault.setPortfolioTargets(assets, bps);
-    //     vault.setPriceFeed(base, address(usdcFeed));
+         InEuint16[] memory encryptedBpsInputs = new InEuint16[](1); 
 
-    //     // Ensure we have some base balance in the vault
-    //     // (you probably already deposited in setUp; if not, do it here)
-    //     // usdc.mint(address(vault), 1_000_000e6); // if needed
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
 
-    //     // Update prices so lastPriceInBase[base] is non-zero
-    //     StealthfolioVaultFHE.DriftResult memory drift = vault.updatePricesAndCheckDriftHarness();
+        // Need to be owner in tests
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
+        vault.setPriceFeed(base, address(usdcFeed));
+        vm.warp(block.timestamp + 5); 
 
-    //     assertFalse(drift.shouldRebalance, "Should not rebalance");
+        // Ensure we have some base balance in the vault
+        // (you probably already deposited in setUp; if not, do it here)
+        // usdc.mint(address(vault), 1_000_000e6); // if needed
+
+        // Update prices so lastPriceInBase[base] is non-zero
+        StealthfolioVaultFHE.DriftResult memory drift = vault.updatePricesAndCheckDriftHarness();
+
+        assertFalse(drift.shouldRebalance, "Should not rebalance");
 
 
-    // }
+    }
 
 
 
-    // // ======================
-    // // Drift Detection Test - updatePricesAndCheckDrift()
-    // // ======================
-    // function testUpdatePricesAndCheckDrift_RevertsIfNoBaseAssetConfigured() public {
-    //     // Create a fresh vault without configuring baseAsset
-    //     StealthfolioVaultHarnessFHE freshVault = new StealthfolioVaultHarnessFHE(manager, hook);
+    // ======================
+    // Drift Detection Test - updatePricesAndCheckDrift()
+    // ======================
+
+    function testUpdatePricesAndCheckDrift_RevertsIfStrategyConfigured() public {
+        // Create a fresh vault without configuring strategy
+        StealthfolioVaultHarnessFHE freshVault = new StealthfolioVaultHarnessFHE(manager, hook);
         
-    //     // Don't configure strategy (baseAsset will be address(0))
-    //     // Attempt to call updatePricesAndCheckDrift without baseAsset configured
-    //     vm.expectRevert("NO_BASE");
-    //     freshVault.updatePricesAndCheckDriftHarness();
-    // }
+        // Don't configure strategy 
+        // Attempt to call updatePricesAndCheckDrift without strategy configured
+        vm.expectRevert("ENCRYPTED_STRATEGY_NOT_SET");
+        freshVault.updatePricesAndCheckDriftHarness();
+    }
 
-    // function testUpdatePricesAndCheckDrift_ReturnsNoRebalanceOnZeroTotal() public {
-    //     // Create a fresh vault
-    //     StealthfolioVaultHarnessFHE freshVault = new StealthfolioVaultHarnessFHE(manager, hook);
+    function testUpdatePricesAndCheckDrift_ReturnsNoRebalanceOnZeroTotal() public {
+        // Create a fresh vault
+        StealthfolioVaultHarnessFHE freshVault = new StealthfolioVaultHarnessFHE(manager, hook);
+
+        // Configure encrypted strategy for the vault 
+        uint32 minDriftBps = 100;        // 1%
+        uint32 batchSizeBps = 2_500;     // 25%
+        uint32 minDriftCheckInterval = 1;
+
+        InEuint32 memory _encMinDriftBps = createInEuint32(
+            minDriftBps,
+            address(this)
+        );
+
+        InEuint32 memory _encBatchSizeBps = createInEuint32(
+            batchSizeBps,
+            address(this)
+        );
+
+        InEuint32 memory _encMinDriftCheckInterval = createInEuint32(
+            minDriftCheckInterval,
+            address(this)
+        );
+
+
+        // Configure strategy on harness with USDC as base asset
+        freshVault.configureEncryptedStrategy(
+            _encMinDriftBps, // minDriftBps: 1%
+            _encBatchSizeBps, // batchSizeBps: 25%
+            _encMinDriftCheckInterval // minDriftCheckInterval: 1 block
+        );
+
         
-    //     // Configure strategy with baseAsset
-    //     freshVault.configureStrategyHarness(
-    //         currencyUSDC,
-    //         100, // minDriftBps
-    //         2_500, // batchSizeBps
-    //         1 // minDriftCheckInterval
-    //     );
+        // Set portfolio targets
+        Currency[] memory assets = new Currency[](3);
+        assets[0] = currencyUSDC;
+        assets[1] = currencyWBTC;
+        assets[2] = currencyWETH;
 
-    //     // Set portfolio targets
-    //     Currency[] memory assets = new Currency[](3);
-    //     assets[0] = currencyUSDC;
-    //     assets[1] = currencyWBTC;
-    //     assets[2] = currencyWETH;
+        uint16[] memory bps = new uint16[](3);
+        bps[0] = 5_000; // 50% USDC
+        bps[1] = 3_000; // 30% WBTC
+        bps[2] = 2_000; // 20% WETH
 
-    //     uint16[] memory bps = new uint16[](3);
-    //     bps[0] = 5_000; // 50% USDC
-    //     bps[1] = 3_000; // 30% WBTC
-    //     bps[2] = 2_000; // 20% WETH
 
-    //     freshVault.setPortfolioTargets(assets, bps);
+         InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
 
-    //     // Set price feeds
-    //     freshVault.setPriceFeed(currencyUSDC, address(usdcFeed));
-    //     freshVault.setPriceFeed(currencyWBTC, address(wbtcFeed));
-    //     freshVault.setPriceFeed(currencyWETH, address(wethFeed));
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
 
-    //     // Don't mint any balances - vault will have zero total value
-    //     // Call updatePricesAndCheckDrift - should return early with shouldRebalance = false
-    //     StealthfolioVaultFHE.DriftResult memory result = freshVault.updatePricesAndCheckDriftHarness();
 
-    //     // Assert: shouldRebalance should be false when totalValue is 0
-    //     assertFalse(result.shouldRebalance, "shouldRebalance should be false when totalValue is 0");
-    //     assertEq(Currency.unwrap(result.targetAsset), address(0), "targetAsset should be zero address when totalValue is 0");
-    //     assertEq(result.batches, 0, "batches should be 0 when totalValue is 0");
-    // }
+        freshVault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
 
-    // function testUpdatePricesAndCheckDrift_BelowDriftThreshold_NoRebalance() public {
-    //     // Create a fresh vault
-    //     StealthfolioVaultHarnessFHE freshVault = new StealthfolioVaultHarnessFHE(manager, hook);
+        // Set price feeds
+        freshVault.setPriceFeed(currencyUSDC, address(usdcFeed));
+        freshVault.setPriceFeed(currencyWBTC, address(wbtcFeed));
+        freshVault.setPriceFeed(currencyWETH, address(wethFeed));
+
+        // Simulate time to give time for decryption to happen
+        vm.warp(block.timestamp + 5); 
+
+        // Don't mint any balances - vault will have zero total value
+        // Call updatePricesAndCheckDrift - should return early with shouldRebalance = false
+        StealthfolioVaultFHE.DriftResult memory result = freshVault.updatePricesAndCheckDriftHarness();
+
+        // Assert: shouldRebalance should be false when totalValue is 0
+        assertFalse(result.shouldRebalance, "shouldRebalance should be false when totalValue is 0");
+        assertEq(Currency.unwrap(result.targetAsset), address(0), "targetAsset should be zero address when totalValue is 0");
+        assertEq(result.batches, 0, "batches should be 0 when totalValue is 0");
+    }
+
+    function testUpdatePricesAndCheckDrift_BelowDriftThreshold_NoRebalance() public {
+        // Create a fresh vault
+        StealthfolioVaultHarnessFHE freshVault = new StealthfolioVaultHarnessFHE(manager, hook);
         
-    //     // Configure strategy with a high minDriftBps threshold (5% = 500 bps)
-    //     // This ensures small drifts won't trigger rebalancing
-    //     freshVault.configureStrategyHarness(
-    //         currencyUSDC,
-    //         500, // minDriftBps: 5% (high threshold)
-    //         2_500, // batchSizeBps: 25%
-    //         1 // minDriftCheckInterval: 1 block
-    //     );
+        // Configure strategy with a high minDriftBps threshold (5% = 500 bps)
+        // This ensures small drifts won't trigger rebalancing
+        // Configure encrypted strategy for the vault 
+        uint32 minDriftBps = 500;        // 5% (high threshold)
+        uint32 batchSizeBps = 2_500;     // 25%
+        uint32 minDriftCheckInterval = 1;
 
-    //     // Set portfolio targets: 50% USDC, 30% WBTC, 20% WETH
-    //     Currency[] memory assets = new Currency[](3);
-    //     assets[0] = currencyUSDC;
-    //     assets[1] = currencyWBTC;
-    //     assets[2] = currencyWETH;
+        InEuint32 memory _encMinDriftBps = createInEuint32(
+            minDriftBps,
+            address(this)
+        );
 
-    //     uint16[] memory bps = new uint16[](3);
-    //     bps[0] = 5_000; // 50% USDC
-    //     bps[1] = 3_000; // 30% WBTC
-    //     bps[2] = 2_000; // 20% WETH
+        InEuint32 memory _encBatchSizeBps = createInEuint32(
+            batchSizeBps,
+            address(this)
+        );
 
-    //     freshVault.setPortfolioTargets(assets, bps);
+        InEuint32 memory _encMinDriftCheckInterval = createInEuint32(
+            minDriftCheckInterval,
+            address(this)
+        );
 
-    //     // Set price feeds
-    //     freshVault.setPriceFeed(currencyUSDC, address(usdcFeed));
-    //     freshVault.setPriceFeed(currencyWBTC, address(wbtcFeed));
-    //     freshVault.setPriceFeed(currencyWETH, address(wethFeed));
 
-    //     // Mint balances that are very close to target allocations
-    //     // This will result in a small drift (< 5%) that should NOT trigger rebalancing
-    //     // Target portfolio value: ~$1,000,000
-    //     // - USDC: $500k (50%) = 500,000 USDC (exactly on target)
-    //     // - WBTC: $300k (30%) = 3 WBTC (exactly on target)  
-    //     // - WETH: $200k (20%) = 66.67 WETH (exactly on target)
+        // Configure strategy on harness with USDC as base asset
+        freshVault.configureEncryptedStrategy(
+            _encMinDriftBps, // minDriftBps: 1%
+            _encBatchSizeBps, // batchSizeBps: 25%
+            _encMinDriftCheckInterval // minDriftCheckInterval: 1 block
+        );
+
+        // Set portfolio targets: 50% USDC, 30% WBTC, 20% WETH
+        Currency[] memory assets = new Currency[](3);
+        assets[0] = currencyUSDC;
+        assets[1] = currencyWBTC;
+        assets[2] = currencyWETH;
+
+        uint16[] memory bps = new uint16[](3);
+        bps[0] = 5_000; // 50% USDC
+        bps[1] = 3_000; // 30% WBTC
+        bps[2] = 2_000; // 20% WETH
+
+         InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+
+
+        freshVault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
+
+        // Set price feeds
+        freshVault.setPriceFeed(currencyUSDC, address(usdcFeed));
+        freshVault.setPriceFeed(currencyWBTC, address(wbtcFeed));
+        freshVault.setPriceFeed(currencyWETH, address(wethFeed));
+
+        // Move time forward to perform decryption
+        vm.warp(block.timestamp + 3); 
+
+        // Mint balances that are very close to target allocations
+        // This will result in a small drift (< 5%) that should NOT trigger rebalancing
+        // Target portfolio value: ~$1,000,000
+        // - USDC: $500k (50%) = 500,000 USDC (exactly on target)
+        // - WBTC: $300k (30%) = 3 WBTC (exactly on target)  
+        // - WETH: $200k (20%) = 66.67 WETH (exactly on target)
         
-    //     // Mint exactly at target to ensure drift is minimal (near 0%)
-    //     usdc.mint(address(freshVault), 500_000e6); // $500k USDC
-    //     wbtc.mint(address(freshVault), 3e8); // 3 WBTC = $300k
-    //     weth.mint(address(freshVault), 66_666_666_666_666_666_666); // ~66.67 WETH = $200k
+        // Mint exactly at target to ensure drift is minimal (near 0%)
+        usdc.mint(address(freshVault), 500_000e6); // $500k USDC
+        wbtc.mint(address(freshVault), 3e8); // 3 WBTC = $300k
+        weth.mint(address(freshVault), 66_666_666_666_666_666_666); // ~66.67 WETH = $200k
 
-    //     // Call updatePricesAndCheckDrift - drift should be below 5% threshold
-    //     StealthfolioVaultFHE.DriftResult memory result = freshVault.updatePricesAndCheckDriftHarness();
+        // Call updatePricesAndCheckDrift - drift should be below 5% threshold
+        StealthfolioVaultFHE.DriftResult memory result = freshVault.updatePricesAndCheckDriftHarness();
 
-    //     // Assert: shouldRebalance should be false when drift is below minDriftBps threshold
-    //     assertFalse(result.shouldRebalance, "shouldRebalance should be false when drift is below threshold");
+        // Assert: shouldRebalance should be false when drift is below minDriftBps threshold
+        assertFalse(result.shouldRebalance, "shouldRebalance should be false when drift is below threshold");
         
-    //     // Verify that lastDriftBps was set (even if below threshold)
-    //     (uint16 lastDriftBps,,) = freshVault.strategyState();
-    //     assertLt(lastDriftBps, 500, "lastDriftBps should be less than minDriftBps (500)");
+        // Verify that lastDriftBps was set (even if below threshold)
+        (uint16 lastDriftBps,,) = freshVault.strategyState();
+        assertLt(lastDriftBps, 500, "lastDriftBps should be less than minDriftBps (500)");
         
-    //     // The targetAsset may be set even if shouldRebalance is false
-    //     // This is expected behavior per the implementation (line 339)
-    // }
+        // The targetAsset may be set even if shouldRebalance is false
+        // This is expected behavior per the implementation (line 339)
+    }
 
-    // function test_updatePricesAndCheckDrift_returnsResult() public {
-    //     StealthfolioVaultFHE.DriftResult memory result =
-    //         vault.updatePricesAndCheckDriftHarness();
+    function test_updatePricesAndCheckDrift_returnsResult() public {
+        StealthfolioVaultFHE.DriftResult memory result =
+            vault.updatePricesAndCheckDriftHarness();
 
-    //     // After first call with non-zero portfolio, we expect:
-    //     // - lastDriftBps to be set (may or may not exceed minDriftBps)
-    //     // - targetAsset to be one of the non-base assets (WBTC or WETH) or zero
+        // After first call with non-zero portfolio, we expect:
+        // - lastDriftBps to be set (may or may not exceed minDriftBps)
+        // - targetAsset to be one of the non-base assets (WBTC or WETH) or zero
 
-    //     // It must at least update lastDriftCheckBlock and not revert
-    //     (uint16 lastDriftBps,, Currency targetAsset) = vault.strategyState();
-    //     assertEq(
-    //         Currency.unwrap(vault.baseAsset()),
-    //         Currency.unwrap(currencyUSDC),
-    //         "base asset should be USDC"
-    //     );
-    //     assertGt(block.number, 0, "block must be non-zero");
-    //     assertEq(
-    //         vault.lastPriceInBase(currencyUSDC) > 0,
-    //         true,
-    //         "USDC price must be cached"
-    //     );
+        // It must at least update lastDriftCheckBlock and not revert
+        (uint16 lastDriftBps,, Currency targetAsset) = vault.strategyState();
+        assertEq(
+            Currency.unwrap(vault.baseAsset()),
+            Currency.unwrap(currencyUSDC),
+            "base asset should be USDC"
+        );
+        assertGt(block.number, 0, "block must be non-zero");
+        assertEq(
+            vault.lastPriceInBase(currencyUSDC) > 0,
+            true,
+            "USDC price must be cached"
+        );
 
-    //     // Basic sanity on returned struct: batches > 0 if shouldRebalance is true
-    //     if (result.shouldRebalance) {
-    //         assertGt(result.batches, 0, "batches must be > 0");
-    //         assertTrue(
-    //             result.targetAsset == currencyWBTC
-    //                 || result.targetAsset == currencyWETH,
-    //             "targetAsset must be a non-base asset"
-    //         );
-    //     }
+        // Basic sanity on returned struct: batches > 0 if shouldRebalance is true
+        if (result.shouldRebalance) {
+            assertGt(result.batches, 0, "batches must be > 0");
+            assertTrue(
+                result.targetAsset == currencyWBTC
+                    || result.targetAsset == currencyWETH,
+                "targetAsset must be a non-base asset"
+            );
+        }
 
-    //     // strategyState should be in sync with result
-    //     if (result.shouldRebalance) {
-    //         (uint16 minDriftBps,,) = vault.strategyConfig(); 
-    //         assertEq(
-    //             Currency.unwrap(targetAsset),
-    //             Currency.unwrap(result.targetAsset),
-    //             "state targetAsset should match result"
-    //         );
-    //         assertEq(
-    //             lastDriftBps >= minDriftBps,
-    //             true,
-    //             "drift bps should exceed threshold when rebalancing"
-    //         );
-    //     }
+        // strategyState should be in sync with result
+        if (result.shouldRebalance) {
+            (euint32 encryptedMinDriftBps, euint32 encryptedBatchSizeBps,  euint32 encryptedMinDriftCheckInterval, bool enabled) = vault.encryptedStrategyConfig(); 
+            assertEq(
+                Currency.unwrap(targetAsset),
+                Currency.unwrap(result.targetAsset),
+                "state targetAsset should match result"
+            );
 
-    //     console.log("Should Rebalance:", result.shouldRebalance); 
-    //     console.log("Should targetAsset:", MockERC20(Currency.unwrap(result.targetAsset)).symbol()); 
-    //     console.log("Should Rebalance:", result.batches); 
 
-    // }
+            (uint32 minDriftBps, bool minDriftBpsIsDecrypt) = FHE.getDecryptResultSafe(encryptedMinDriftBps);
+            
+            assertTrue(minDriftBpsIsDecrypt, "Not finished decryption"); 
 
-    // function test_updatePrices_returnsPerAssetValuesAndTotal() public {
-    //     (uint256 totalValue, uint256[] memory values) =
-    //         vault.updatePricesHarness();
+            assertEq( uint32(lastDriftBps) >= minDriftBps, true, "drift bps should exceed threshold when rebalancing");
+        }
 
-    //     // Expect one value per configured portfolio asset
-    //     assertEq(values.length, 3, "values length should equal number of assets");
+        console.log("Should Rebalance:", result.shouldRebalance); 
+        console.log("Should targetAsset:", MockERC20(Currency.unwrap(result.targetAsset)).symbol()); 
+        console.log("Should Rebalance:", result.batches); 
 
-    //     // Manually recompute each asset's value using cached prices and balances
-    //     uint256 usdcPrice = vault.lastPriceInBase(currencyUSDC);
-    //     uint256 wbtcPrice = vault.lastPriceInBase(currencyWBTC);
-    //     uint256 wethPrice = vault.lastPriceInBase(currencyWETH);
+    }
 
-    //     assertGt(usdcPrice, 0, "USDC price must be > 0");
-    //     assertGt(wbtcPrice, 0, "WBTC price must be > 0");
-    //     assertGt(wethPrice, 0, "WETH price must be > 0");
+    function test_updatePrices_returnsPerAssetValuesAndTotal() public {
+        (uint256 totalValue, uint256[] memory values) =
+            vault.updatePricesHarness();
 
-    //     uint256 usdcBal = IERC20(Currency.unwrap(currencyUSDC)).balanceOf(address(vault));
-    //     uint256 wbtcBal = IERC20(Currency.unwrap(currencyWBTC)).balanceOf(address(vault));
-    //     uint256 wethBal = IERC20(Currency.unwrap(currencyWETH)).balanceOf(address(vault));
+        // Expect one value per configured portfolio asset
+        assertEq(values.length, 3, "values length should equal number of assets");
 
-    //     // Mirror vault normalization via harness helper
-    //     uint256 usdcNormBal =
-    //         vault.normalizeBalanceHarness(Currency.unwrap(currencyUSDC), usdcBal);
-    //     uint256 wbtcNormBal =
-    //         vault.normalizeBalanceHarness(Currency.unwrap(currencyWBTC), wbtcBal);
-    //     uint256 wethNormBal =
-    //         vault.normalizeBalanceHarness(Currency.unwrap(currencyWETH), wethBal);
+        // Manually recompute each asset's value using cached prices and balances
+        uint256 usdcPrice = vault.lastPriceInBase(currencyUSDC);
+        uint256 wbtcPrice = vault.lastPriceInBase(currencyWBTC);
+        uint256 wethPrice = vault.lastPriceInBase(currencyWETH);
 
-    //     uint256 expectedUsdcValue = (usdcNormBal * usdcPrice) / 1e18;
-    //     uint256 expectedWbtcValue = (wbtcNormBal * wbtcPrice) / 1e18;
-    //     uint256 expectedWethValue = (wethNormBal * wethPrice) / 1e18;
+        assertGt(usdcPrice, 0, "USDC price must be > 0");
+        assertGt(wbtcPrice, 0, "WBTC price must be > 0");
+        assertGt(wethPrice, 0, "WETH price must be > 0");
 
-    //     // Order of assets in setUp(): [USDC, WBTC, WETH]
-    //     assertEq(values[0], expectedUsdcValue, "USDC value mismatch");
-    //     assertEq(values[1], expectedWbtcValue, "WBTC value mismatch");
-    //     assertEq(values[2], expectedWethValue, "WETH value mismatch");
+        uint256 usdcBal = IERC20(Currency.unwrap(currencyUSDC)).balanceOf(address(vault));
+        uint256 wbtcBal = IERC20(Currency.unwrap(currencyWBTC)).balanceOf(address(vault));
+        uint256 wethBal = IERC20(Currency.unwrap(currencyWETH)).balanceOf(address(vault));
 
-    //     uint256 expectedTotal = expectedUsdcValue + expectedWbtcValue + expectedWethValue;
-    //     assertEq(totalValue, expectedTotal, "totalValue should equal sum of asset values");
-    // }
+        // Mirror vault normalization via harness helper
+        uint256 usdcNormBal =
+            vault.normalizeBalanceHarness(Currency.unwrap(currencyUSDC), usdcBal);
+        uint256 wbtcNormBal =
+            vault.normalizeBalanceHarness(Currency.unwrap(currencyWBTC), wbtcBal);
+        uint256 wethNormBal =
+            vault.normalizeBalanceHarness(Currency.unwrap(currencyWETH), wethBal);
 
-    // function test_computePortfolioValue_matchesUpdatePricesTotals() public {
-    //     // First, populate price cache by calling updatePrices
-    //     (uint256 totalValue, uint256[] memory values) =
-    //         vault.updatePricesHarness();
+        uint256 expectedUsdcValue = (usdcNormBal * usdcPrice) / 1e18;
+        uint256 expectedWbtcValue = (wbtcNormBal * wbtcPrice) / 1e18;
+        uint256 expectedWethValue = (wethNormBal * wethPrice) / 1e18;
 
-    //     // For each asset, compute portfolio value using cached prices and balances
-    //     (uint256 totalFromCompute, uint256 usdcValue) =
-    //         vault.computePortfolioValueHarness(currencyUSDC);
-    //     (, uint256 wbtcValue) =
-    //         vault.computePortfolioValueHarness(currencyWBTC);
-    //     (, uint256 wethValue) =
-    //         vault.computePortfolioValueHarness(currencyWETH);
+        // Order of assets in setUp(): [USDC, WBTC, WETH]
+        assertEq(values[0], expectedUsdcValue, "USDC value mismatch");
+        assertEq(values[1], expectedWbtcValue, "WBTC value mismatch");
+        assertEq(values[2], expectedWethValue, "WETH value mismatch");
 
-    //     // Log values for visual inspection
-    //     console.log("updatePrices totalValue:", totalValue);
-    //     console.log("computePortfolioValue totalValue:", totalFromCompute);
-    //     console.log("USDC value:", usdcValue);
-    //     console.log("WBTC value:", wbtcValue);
-    //     console.log("WETH value:", wethValue);
-    //     console.log("values[0-2]:", values[0], values[1], values[2]);
+        uint256 expectedTotal = expectedUsdcValue + expectedWbtcValue + expectedWethValue;
+        assertEq(totalValue, expectedTotal, "totalValue should equal sum of asset values");
+    }
 
-    //     // Totals should match
-    //     assertEq(
-    //         totalFromCompute,
-    //         totalValue,
-    //         "computePortfolioValue total must equal updatePrices total"
-    //     );
+    function test_computePortfolioValue_matchesUpdatePricesTotals() public {
+        // First, populate price cache by calling updatePrices
+        (uint256 totalValue, uint256[] memory values) =
+            vault.updatePricesHarness();
 
-    //     // Per-asset values should match values[] from _updatePrices
-    //     // Order of assets in setUp(): [USDC, WBTC, WETH]
-    //     assertEq(usdcValue, values[0], "USDC value mismatch");
-    //     assertEq(wbtcValue, values[1], "WBTC value mismatch");
-    //     assertEq(wethValue, values[2], "WETH value mismatch");
-    // }
+        // For each asset, compute portfolio value using cached prices and balances
+        (uint256 totalFromCompute, uint256 usdcValue) =
+            vault.computePortfolioValueHarness(currencyUSDC);
+        (, uint256 wbtcValue) =
+            vault.computePortfolioValueHarness(currencyWBTC);
+        (, uint256 wethValue) =
+            vault.computePortfolioValueHarness(currencyWETH);
+
+        // Log values for visual inspection
+        console.log("updatePrices totalValue:", totalValue);
+        console.log("computePortfolioValue totalValue:", totalFromCompute);
+        console.log("USDC value:", usdcValue);
+        console.log("WBTC value:", wbtcValue);
+        console.log("WETH value:", wethValue);
+        console.log("values[0-2]:", values[0], values[1], values[2]);
+
+        // Totals should match
+        assertEq(
+            totalFromCompute,
+            totalValue,
+            "computePortfolioValue total must equal updatePrices total"
+        );
+
+        // Per-asset values should match values[] from _updatePrices
+        // Order of assets in setUp(): [USDC, WBTC, WETH]
+        assertEq(usdcValue, values[0], "USDC value mismatch");
+        assertEq(wbtcValue, values[1], "WBTC value mismatch");
+        assertEq(wethValue, values[2], "WETH value mismatch");
+    }
 }
 
