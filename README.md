@@ -131,6 +131,65 @@ The system uses threshold decryption where encrypted values are decrypted off-ch
 
 ![HighLevel](./assets/HighLevel.png)
 
+## FHE Integration with Fhenix
+
+Stealthfolio integrates with [Fhenix](https://fhenix.io/) to provide Fully Homomorphic Encryption (FHE) capabilities. Fhenix enables on-chain computation on encrypted data without requiring decryption, allowing strategy parameters to remain confidential while still being usable in smart contract logic.
+
+All sensitive strategy parameters are encrypted using Fhenix's encrypted integer types (`euint16`, `euint32`, `euint128`, `euint256`). These encrypted values can be used in computations after threshold decryption, which occurs off-chain through Fhenix's network of FHE nodes.
+
+### Encrypted Vault Strategy Parameters
+
+The vault stores encrypted strategy configuration that determines when and how rebalancing occurs:
+
+```solidity
+struct EncryptedStrategyConfig {
+    euint32 encryptedMinDriftBps;        // Minimum drift threshold in basis points before rebalancing
+    euint32 encryptedBatchSizeBps;      // Per-batch fraction of deviation (basis points)
+    euint32 encryptedMinDriftCheckInterval; // Minimum blocks between drift checks
+    bool enabled;
+}
+
+// Encrypted target allocations per asset
+mapping(Currency => euint16) public encryptedTargetAllocBps; // Currency -> allocation in basis points
+euint16 public encryptedTotalAllocBps; // Total allocation sum (must equal 10,000 bps)
+```
+
+**Why encrypted**: These parameters reveal the rebalancing strategy. Keeping them encrypted prevents competitors from copying the strategy and attackers from front-running rebalancing actions.
+
+### Encrypted Hook Safeguards
+
+The hook enforces three layers of encrypted safeguards to protect against manipulation during rebalancing:
+
+**Volatility Bands** - Prevents trading in manipulated markets:
+```solidity
+struct VolBand {
+    euint256 encryptedCenterSqrtPriceX96;  // Encrypted center price (sqrtPriceX96 format)
+    euint32 encryptedWidthBps;             // Encrypted width in basis points (e.g., 500 = ±5%)
+    bool enabled;
+}
+```
+
+**Max Trade Guards** - Limits individual trade sizes:
+```solidity
+struct MaxTradeGuard {
+    euint128 encryptedMaxTrade;  // Encrypted maximum trade size
+    bool enabled;
+}
+```
+
+**Toxic Flow Detection** - Prevents directional manipulation:
+```solidity
+struct ToxicFlowConfig {
+    bool enabled;
+    euint32 encWindowBlocks;              // Encrypted window length in blocks
+    euint32 encMaxSameDirLargeTrades;     // Encrypted maximum same-direction trades
+    euint256 encMinLargeTradeAmount;      // Encrypted threshold for "large" trade detection
+}
+```
+
+**Why encrypted**: Safeguard parameters reveal protection thresholds. Encrypting them prevents attackers from probing the system to find safe manipulation windows.
+
+
 ## Sequence Diagram
 ### 1. Configuration Phase 
 
@@ -328,3 +387,5 @@ sequenceDiagram
 Run coverage test
 `forge coverage --report lcov --ir-minimum && genhtml lcov.info --output-dir coverage_report`
 
+![Coverage](./assets/Coverage.png)
+![Testcases](./assets/Testcases.png)
