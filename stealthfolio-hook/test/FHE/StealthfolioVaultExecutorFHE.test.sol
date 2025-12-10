@@ -21,18 +21,24 @@ import {PoolId} from "v4-core/types/PoolId.sol";
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {SqrtPriceMath} from "v4-core/libraries/SqrtPriceMath.sol";
 import {LiquidityAmounts} from "@uniswap/v4-core/test/utils/LiquidityAmounts.sol";
-import {StealthfolioVault} from "../src/StealthfolioVaultExecutor.sol";
-import {StealthfolioHook} from "../src/hooks/StealthfolioHook.sol";
+
+//
+import {StealthfolioVaultFHE} from "../../src/StealthfolioVaultExecutorFHE.sol";
+import {StealthfolioFHEHook} from "../../src/hooks/StealthfolioFHEHook.sol";
 import {Hooks} from "v4-core/libraries/Hooks.sol";
-import {CalculatePrice} from "../src/utils/CalculatePrice.sol";
+import {CalculatePrice} from "../../src/utils/CalculatePrice.sol";
+
+// Fhenix imports
+import {FHE, InEuint128, InEuint256, InEuint32, InEuint16, euint128, euint256, euint32, euint16} from "@fhenixprotocol/cofhe-contracts/FHE.sol";
+import {CoFheTest} from "@fhenixprotocol/cofhe-mock-contracts/CoFheTest.sol";
 
 import "forge-std/console.sol"; 
 
-contract StealthfolioVaultHarness is StealthfolioVault {
+contract StealthfolioVaultHarnessFHE is StealthfolioVaultFHE {
     using CurrencyLibrary for Currency;
 
-    constructor(IPoolManager _manager, StealthfolioHook _hook)
-        StealthfolioVault(_manager, _hook)
+    constructor(IPoolManager _manager, StealthfolioFHEHook _hook)
+        StealthfolioVaultFHE(_manager, _hook)
     {}
 
     /// @dev Expose balance normalization helper for testing.
@@ -84,27 +90,6 @@ contract StealthfolioVaultHarness is StealthfolioVault {
     }
 
 
-    /// @dev Test-only helper to configure strategy & base asset
-    function configureStrategyHarness(
-        Currency _baseAsset,
-        uint16 _minDriftBps,
-        uint16 _batchSizeBps,
-        uint32 _minDriftCheckInterval
-    ) external onlyOwner {
-        baseAsset = _baseAsset;
-
-        strategyConfig = StrategyConfig({
-            minDriftBps: _minDriftBps,
-            batchSizeBps: _batchSizeBps,
-            minDriftCheckInterval: _minDriftCheckInterval
-        });
-
-        strategyState = StrategyState({
-            lastDriftBps: 0,
-            lastDriftCheckBlock: 0,
-            targetAsset: Currency.wrap(address(0))
-        });
-    }
 
     /// @dev Expose _computeBatchParams for testing
     function computeBatchParamsHarness()
@@ -113,11 +98,6 @@ contract StealthfolioVaultHarness is StealthfolioVault {
         returns (BatchParams memory)
     {
         return _computeBatchParams();
-    }
-
-    /// @dev Helper to set targetAsset in strategy state for testing
-    function setTargetAssetHarness(Currency asset) external {
-        strategyState.targetAsset = asset;
     }
 
     /// @dev Expose _computeSwapDirection() for testing
@@ -132,11 +112,11 @@ contract StealthfolioVaultHarness is StealthfolioVault {
 
 }
 
-contract StealthfolioVaultExecutorTest is Test, Deployers {
+contract StealthfolioVaultExecutorFHETest is Test, CoFheTest, Deployers {
     using CurrencyLibrary for Currency;
 
-    StealthfolioVaultHarness vault;
-    StealthfolioHook hook;
+    StealthfolioVaultHarnessFHE vault;
+    StealthfolioFHEHook hook;
 
     PoolKey wbtcPoolKey;
     PoolKey wethPoolKey;
@@ -169,12 +149,12 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         // Deploy hook
         uint160 flags = uint160(Hooks.BEFORE_SWAP_FLAG);
         address hookAddress = address(flags);
-        deployCodeTo("StealthfolioHook.sol", abi.encode(manager), hookAddress);
-        hook = StealthfolioHook(hookAddress);
+        deployCodeTo("StealthfolioFHEHook.sol", abi.encode(manager), hookAddress);
+        hook = StealthfolioFHEHook(hookAddress);
 
         
 
-        vault = new StealthfolioVaultHarness(manager, hook);
+        vault = new StealthfolioVaultHarnessFHE(manager, hook);
 
         // Deploy mock tokens
         usdc = new MockERC20("USD Coin", "USDC", 6);
@@ -191,21 +171,45 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         currencyWBTC = Currency.wrap(address(wbtc));
         currencyWETH = Currency.wrap(address(weth));
 
-        // Configure strategy on harness with USDC as base asset
-        vault.configureStrategyHarness(
-            currencyUSDC,
-            100, // minDriftBps: 1%
-            2_500, // batchSizeBps: 25%
-            1 // minDriftCheckInterval: 1 block
+
+        // Configure encrypted strategy for the vault 
+        uint32 minDriftBps = 100;        // 1%
+        uint32 batchSizeBps = 2_500;     // 25%
+        uint32 minDriftCheckInterval = 1;
+
+
+
+        InEuint32 memory _encMinDriftBps = createInEuint32(
+            minDriftBps,
+            address(this)
         );
 
-         // Configure hook
+        InEuint32 memory _encBatchSizeBps = createInEuint32(
+            batchSizeBps,
+            address(this)
+        );
+
+        InEuint32 memory _encMinDriftCheckInterval = createInEuint32(
+            minDriftCheckInterval,
+            address(this)
+        );
+
+        // Configure hook
         hook.configureHook(
             address(vault),
             currencyUSDC,
             10, // rebalanceCooldown: 10 blocks
             100 // rebalanceMaxDuration: 100 blocks
         );
+
+        // Configure strategy on harness with USDC as base asset
+        vault.configureEncryptedStrategy(
+            _encMinDriftBps, // minDriftBps: 1%
+            _encBatchSizeBps, // batchSizeBps: 25%
+            _encMinDriftCheckInterval // minDriftCheckInterval: 1 block
+        );
+
+         
 
 
         // Calculate BTCUSD SqrtPrice
@@ -386,7 +390,15 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         bps[1] = 3_000; // 30% WBTC
         bps[2] = 2_000; // 20% WETH
 
-        vault.setPortfolioTargets(assets, bps);
+        InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+        
+
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
 
         // Set price feeds
         vault.setPriceFeed(currencyUSDC, address(usdcFeed));
@@ -397,6 +409,10 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         usdc.mint(address(vault), 500_000e6); // 500k USDC
         wbtc.mint(address(vault), 5e8); // 5 WBTC
         weth.mint(address(vault), 50e18); // 50 WETH
+
+
+        // Time fast forward to let the decryption finish
+        vm.warp(block.timestamp + 10);
     }
 
 
@@ -405,15 +421,14 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
     // ======================    
 
     function testConfigureStrategy_SetsFieldsCorrectly() public {
-        uint16 minDriftBpsInput = 100; 
-        uint16 batchSizeBpsInput = 5000; 
-        uint32 minDriftCheckIntervalInput = 2; 
 
-        vault.configureStrategy(minDriftBpsInput, batchSizeBpsInput, minDriftCheckIntervalInput); 
-        (uint16 minDriftBpsOutput, uint16 batchSizeBpsOutput, uint32 minDriftCheckIntervalOutput) = vault.strategyConfig(); 
-        assertEq(minDriftBpsOutput, minDriftBpsInput, "minDriftBps mismatch");
-        assertEq(batchSizeBpsOutput, batchSizeBpsInput, "batchSizeBps mismatch");
-        assertEq(minDriftCheckIntervalOutput, minDriftCheckIntervalInput, "minDriftCheckInterval mismatch");
+        (euint32 encryptedMinDriftBps, euint32 encryptedBatchSizeBps, euint32 encryptedMinDriftCheckInterval, bool enabled ) = vault.encryptedStrategyConfig(); 
+
+        assertHashValue(encryptedMinDriftBps, 100); 
+        assertHashValue(encryptedBatchSizeBps, 2_500); 
+        assertHashValue(encryptedMinDriftCheckInterval, 1); 
+        assertTrue(enabled, "Not Enabled ");
+
 
         (uint16 lastDriftBpsOutput, uint32 lastDriftCheckBlockOutput, Currency targetAssetOutput) = vault.strategyState(); 
         assertEq(lastDriftBpsOutput, 0);
@@ -424,13 +439,6 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
 
     function testSetPortfolioTargets_ValidInputStoresState() public {
         
-        // Configure strategy to set baseAsset (required before setPortfolioTargets)
-        vault.configureStrategyHarness(
-            currencyUSDC, // baseAsset
-            100, // minDriftBps
-            2_500, // batchSizeBps
-            1 // minDriftCheckInterval
-        );
 
         // Set portfolio targets: 50% USDC, 25% WBTC, 25% WETH
         Currency[] memory assets = new Currency[](3);
@@ -443,7 +451,16 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         bps[1] = 2_500; // 25% WBTC
         bps[2] = 2_500; // 25% WETH
 
-        vault.setPortfolioTargets(assets, bps);
+        InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+
+
+
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
 
         // Assert: portfolioAssets.length == 3
         assertEq(Currency.unwrap(vault.portfolioAssets(0)), Currency.unwrap(currencyUSDC), "portfolioAssets[0] should be USDC");
@@ -451,9 +468,15 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         assertEq(Currency.unwrap(vault.portfolioAssets(2)), Currency.unwrap(currencyWETH), "portfolioAssets[2] should be WETH");
 
         // Assert: targetAllocBps values are correct
-        assertEq(vault.targetAllocBps(currencyUSDC), 5_000, "USDC allocation should be 5000 bps");
-        assertEq(vault.targetAllocBps(currencyWBTC), 2_500, "WBTC allocation should be 2500 bps");
-        assertEq(vault.targetAllocBps(currencyWETH), 2_500, "WETH allocation should be 2500 bps");
+        euint16 tBps_usdc = vault.encryptedTargetAllocBps(currencyUSDC); 
+        assertHashValue(tBps_usdc,5_000 ); 
+
+        euint16 tBps_wbtc = vault.encryptedTargetAllocBps(currencyWBTC); 
+        assertHashValue(tBps_wbtc,2_500 ); 
+
+        euint16 tBps_weth = vault.encryptedTargetAllocBps(currencyWETH); 
+        assertHashValue(tBps_weth, 2_500 ); 
+
 
         // Assert: baseAsset is in the portfolio (this is validated in setPortfolioTargets, but we verify it's set)
         assertEq(Currency.unwrap(vault.baseAsset()), Currency.unwrap(currencyUSDC), "baseAsset should be USDC");
@@ -470,19 +493,13 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
     }
 
 
-    // ======================
-    // Configuration Tests for the Vault  - Negative tests
-    // ======================
+    // // ======================
+    // // Configuration Tests for the Vault  - Negative tests
+    // // ======================
 
 
     function testSetPortfolioTargets_RevertsIfTotalBpsNot10000() public {
-        // Configure strategy to set baseAsset (required before setPortfolioTargets)
-        vault.configureStrategyHarness(
-            currencyUSDC, // baseAsset
-            100, // minDriftBps
-            2_500, // batchSizeBps
-            1 // minDriftCheckInterval
-        );
+        
 
         // Set portfolio targets with invalid total: 50% USDC, 30% WBTC, 25% WETH = 10,500 bps (should be 10,000)
         Currency[] memory assets = new Currency[](3);
@@ -495,19 +512,28 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         bps[1] = 3_000; // 30% WBTC
         bps[2] = 2_500; // 25% WETH (total = 10,500, not 10,000)
 
+        InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
+
+        // Time fast forward to let the decryption finish
+        vm.warp(block.timestamp + 5);
+
         vm.expectRevert("TOTAL_BPS_NEQ_100");
-        vault.setPortfolioTargets(assets, bps);
+        vault.rebalanceStep(); 
+        
+
+
+
     }
 
     function testSetPortfolioTargets_RevertsIfBaseNotInPortfolio() public {
-        // Configure strategy with USDC as baseAsset
-        vault.configureStrategyHarness(
-            currencyUSDC, // baseAsset
-            100,
-            2_500,
-            1
-        );
-
+        
         // Set portfolio targets without baseAsset (only WBTC and WETH)
         Currency[] memory assets = new Currency[](2);
         assets[0] = currencyWBTC;
@@ -517,43 +543,45 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         bps[0] = 5_000; // 50% WBTC
         bps[1] = 5_000; // 50% WETH
 
+        InEuint16[] memory encryptedBpsInputs = new InEuint16[](2); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+
         vm.expectRevert("BASE_NOT_IN_PORTFOLIO");
-        vault.setPortfolioTargets(assets, bps);
+
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
     }
 
-    function testSetPortfolioTargets_RevertsIfBpsZero() public {
-        // Configure strategy to set baseAsset
-        vault.configureStrategyHarness(
-            currencyUSDC,
-            100,
-            2_500,
-            1
-        );
+    // Remove this test since we cannot check BPS zero for encrypted
+    // function testSetPortfolioTargets_RevertsIfBpsZero() public {
 
-        // Set portfolio targets with zero BPS for one asset
-        Currency[] memory assets = new Currency[](3);
-        assets[0] = currencyUSDC;
-        assets[1] = currencyWBTC;
-        assets[2] = currencyWETH;
+    //     // Set portfolio targets with zero BPS for one asset
+    //     Currency[] memory assets = new Currency[](3);
+    //     assets[0] = currencyUSDC;
+    //     assets[1] = currencyWBTC;
+    //     assets[2] = currencyWETH;
 
-        uint16[] memory bps = new uint16[](3);
-        bps[0] = 5_000; // 50% USDC
-        bps[1] = 0; // 0% WBTC (should revert)
-        bps[2] = 5_000; // 50% WETH
+    //     uint16[] memory bps = new uint16[](3);
+    //     bps[0] = 5_000; // 50% USDC
+    //     bps[1] = 0; // 0% WBTC (should revert)
+    //     bps[2] = 5_000; // 50% WETH
 
-        vm.expectRevert("BPS_ZERO");
-        vault.setPortfolioTargets(assets, bps);
-    }
+    //     InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
+
+    //     for (uint16 i = 0; i < bps.length; i++){
+    //         InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+    //         encryptedBpsInputs[i] = _encBps; 
+    //     }
+
+    //     vm.expectRevert("BPS_ZERO");
+    //     vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
+    // }
 
     function testSetPortfolioTargets_RevertsIfAssetZero() public {
-        // Configure strategy to set baseAsset
-        vault.configureStrategyHarness(
-            currencyUSDC,
-            100,
-            2_500,
-            1
-        );
-
+        
         // Set portfolio targets with zero address for one asset
         Currency[] memory assets = new Currency[](3);
         assets[0] = currencyUSDC;
@@ -565,19 +593,18 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         bps[1] = 2_500; // 25% (invalid asset)
         bps[2] = 2_500; // 25% WETH
 
+        InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+
         vm.expectRevert("ASSET_ZERO");
-        vault.setPortfolioTargets(assets, bps);
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
     }
 
     function testSetPortfolioTargets_RevertsIfArraysLengthMismatch() public {
-        // Configure strategy to set baseAsset
-        vault.configureStrategyHarness(
-            currencyUSDC,
-            100,
-            2_500,
-            1
-        );
-
         // Set portfolio targets with mismatched array lengths
         Currency[] memory assets = new Currency[](3);
         assets[0] = currencyUSDC;
@@ -588,12 +615,19 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         bps[0] = 5_000;
         bps[1] = 5_000;
 
+         InEuint16[] memory encryptedBpsInputs = new InEuint16[](2); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+
         vm.expectRevert("ASSETS_BPS_LEN");
-        vault.setPortfolioTargets(assets, bps);
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
     }
 
 
-    // ======= Test functions functionality =========
+    // // ======= Test functions functionality =========
 
     function test_findMaxDeviation() public {
         (Currency maxAsset, uint256 maxAbsDev) = vault.findMaxDeviationHarness(); 
@@ -602,13 +636,13 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
     }
 
 
-    // ======================
-    // Batch Computation Tests - computeBatchParams() 
-    // ======================
+    // // ======================
+    // // Batch Computation Tests - computeBatchParams() 
+    // // ======================
     
     
     function testComputeSwapDirection_AssetIsToken0_DevPositive_BuysAsset() public {
-         Currency asset = currencyWBTC;
+        Currency asset = currencyWBTC;
         PoolKey memory key = PoolKey({
             currency0: asset,          // WBTC
             currency1: currencyUSDC,   // USDC
@@ -704,7 +738,7 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         usdcFeed.updateAnswer(1e8);         // 1 USDC = 1 USDC
 
         // Update prices & compute drift; this will also set strategyState.targetAsset
-        StealthfolioVault.DriftResult memory drift =
+        StealthfolioVaultFHE.DriftResult memory drift =
             vault.updatePricesAndCheckDriftHarness();
 
         // We expect:
@@ -719,7 +753,7 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
 
         // --- Act: compute batch params from strategy state and cached prices ---
 
-        StealthfolioVault.BatchParams memory params =
+        StealthfolioVaultFHE.BatchParams memory params =
             vault.computeBatchParamsHarness();
 
         // --- Assert: direction + amount semantics ---
@@ -764,7 +798,7 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         usdcFeed.updateAnswer(1e8);         // 1 USDC = 1 USDC
 
         // Recompute drift
-        StealthfolioVault.DriftResult memory drift =
+        StealthfolioVaultFHE.DriftResult memory drift =
             vault.updatePricesAndCheckDriftHarness();
 
         // We expect a rebalance, with WBTC as the underweight asset
@@ -777,7 +811,7 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
 
         // --- Act: compute batch params ---
 
-        StealthfolioVault.BatchParams memory params =
+        StealthfolioVaultFHE.BatchParams memory params =
             vault.computeBatchParamsHarness();
 
         // --- Assert: direction + amount semantics ---
@@ -844,16 +878,24 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         uint16[] memory bps = new uint16[](1); 
         bps[0] = 10_000; // 100%
 
+         InEuint16[] memory encryptedBpsInputs = new InEuint16[](1); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+
         // Need to be owner in tests
-        vault.setPortfolioTargets(assets, bps);
+        vault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
         vault.setPriceFeed(base, address(usdcFeed));
+        vm.warp(block.timestamp + 5); 
 
         // Ensure we have some base balance in the vault
         // (you probably already deposited in setUp; if not, do it here)
         // usdc.mint(address(vault), 1_000_000e6); // if needed
 
         // Update prices so lastPriceInBase[base] is non-zero
-        StealthfolioVault.DriftResult memory drift = vault.updatePricesAndCheckDriftHarness();
+        StealthfolioVaultFHE.DriftResult memory drift = vault.updatePricesAndCheckDriftHarness();
 
         assertFalse(drift.shouldRebalance, "Should not rebalance");
 
@@ -865,28 +907,50 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
     // ======================
     // Drift Detection Test - updatePricesAndCheckDrift()
     // ======================
-    function testUpdatePricesAndCheckDrift_RevertsIfNoBaseAssetConfigured() public {
-        // Create a fresh vault without configuring baseAsset
-        StealthfolioVaultHarness freshVault = new StealthfolioVaultHarness(manager, hook);
+
+    function testUpdatePricesAndCheckDrift_RevertsIfStrategyConfigured() public {
+        // Create a fresh vault without configuring strategy
+        StealthfolioVaultHarnessFHE freshVault = new StealthfolioVaultHarnessFHE(manager, hook);
         
-        // Don't configure strategy (baseAsset will be address(0))
-        // Attempt to call updatePricesAndCheckDrift without baseAsset configured
-        vm.expectRevert("NO_BASE");
+        // Don't configure strategy 
+        // Attempt to call updatePricesAndCheckDrift without strategy configured
+        vm.expectRevert("ENCRYPTED_STRATEGY_NOT_SET");
         freshVault.updatePricesAndCheckDriftHarness();
     }
 
     function testUpdatePricesAndCheckDrift_ReturnsNoRebalanceOnZeroTotal() public {
         // Create a fresh vault
-        StealthfolioVaultHarness freshVault = new StealthfolioVaultHarness(manager, hook);
-        
-        // Configure strategy with baseAsset
-        freshVault.configureStrategyHarness(
-            currencyUSDC,
-            100, // minDriftBps
-            2_500, // batchSizeBps
-            1 // minDriftCheckInterval
+        StealthfolioVaultHarnessFHE freshVault = new StealthfolioVaultHarnessFHE(manager, hook);
+
+        // Configure encrypted strategy for the vault 
+        uint32 minDriftBps = 100;        // 1%
+        uint32 batchSizeBps = 2_500;     // 25%
+        uint32 minDriftCheckInterval = 1;
+
+        InEuint32 memory _encMinDriftBps = createInEuint32(
+            minDriftBps,
+            address(this)
         );
 
+        InEuint32 memory _encBatchSizeBps = createInEuint32(
+            batchSizeBps,
+            address(this)
+        );
+
+        InEuint32 memory _encMinDriftCheckInterval = createInEuint32(
+            minDriftCheckInterval,
+            address(this)
+        );
+
+
+        // Configure strategy on harness with USDC as base asset
+        freshVault.configureEncryptedStrategy(
+            _encMinDriftBps, // minDriftBps: 1%
+            _encBatchSizeBps, // batchSizeBps: 25%
+            _encMinDriftCheckInterval // minDriftCheckInterval: 1 block
+        );
+
+        
         // Set portfolio targets
         Currency[] memory assets = new Currency[](3);
         assets[0] = currencyUSDC;
@@ -898,16 +962,28 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         bps[1] = 3_000; // 30% WBTC
         bps[2] = 2_000; // 20% WETH
 
-        freshVault.setPortfolioTargets(assets, bps);
+
+         InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+
+
+        freshVault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
 
         // Set price feeds
         freshVault.setPriceFeed(currencyUSDC, address(usdcFeed));
         freshVault.setPriceFeed(currencyWBTC, address(wbtcFeed));
         freshVault.setPriceFeed(currencyWETH, address(wethFeed));
 
+        // Simulate time to give time for decryption to happen
+        vm.warp(block.timestamp + 5); 
+
         // Don't mint any balances - vault will have zero total value
         // Call updatePricesAndCheckDrift - should return early with shouldRebalance = false
-        StealthfolioVault.DriftResult memory result = freshVault.updatePricesAndCheckDriftHarness();
+        StealthfolioVaultFHE.DriftResult memory result = freshVault.updatePricesAndCheckDriftHarness();
 
         // Assert: shouldRebalance should be false when totalValue is 0
         assertFalse(result.shouldRebalance, "shouldRebalance should be false when totalValue is 0");
@@ -917,15 +993,36 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
 
     function testUpdatePricesAndCheckDrift_BelowDriftThreshold_NoRebalance() public {
         // Create a fresh vault
-        StealthfolioVaultHarness freshVault = new StealthfolioVaultHarness(manager, hook);
+        StealthfolioVaultHarnessFHE freshVault = new StealthfolioVaultHarnessFHE(manager, hook);
         
         // Configure strategy with a high minDriftBps threshold (5% = 500 bps)
         // This ensures small drifts won't trigger rebalancing
-        freshVault.configureStrategyHarness(
-            currencyUSDC,
-            500, // minDriftBps: 5% (high threshold)
-            2_500, // batchSizeBps: 25%
-            1 // minDriftCheckInterval: 1 block
+        // Configure encrypted strategy for the vault 
+        uint32 minDriftBps = 500;        // 5% (high threshold)
+        uint32 batchSizeBps = 2_500;     // 25%
+        uint32 minDriftCheckInterval = 1;
+
+        InEuint32 memory _encMinDriftBps = createInEuint32(
+            minDriftBps,
+            address(this)
+        );
+
+        InEuint32 memory _encBatchSizeBps = createInEuint32(
+            batchSizeBps,
+            address(this)
+        );
+
+        InEuint32 memory _encMinDriftCheckInterval = createInEuint32(
+            minDriftCheckInterval,
+            address(this)
+        );
+
+
+        // Configure strategy on harness with USDC as base asset
+        freshVault.configureEncryptedStrategy(
+            _encMinDriftBps, // minDriftBps: 1%
+            _encBatchSizeBps, // batchSizeBps: 25%
+            _encMinDriftCheckInterval // minDriftCheckInterval: 1 block
         );
 
         // Set portfolio targets: 50% USDC, 30% WBTC, 20% WETH
@@ -939,12 +1036,23 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         bps[1] = 3_000; // 30% WBTC
         bps[2] = 2_000; // 20% WETH
 
-        freshVault.setPortfolioTargets(assets, bps);
+         InEuint16[] memory encryptedBpsInputs = new InEuint16[](3); 
+
+        for (uint16 i = 0; i < bps.length; i++){
+            InEuint16 memory _encBps = createInEuint16(bps[i] ,address(this));
+            encryptedBpsInputs[i] = _encBps; 
+        }
+
+
+        freshVault.setEncryptedPortfolioTargets(assets, encryptedBpsInputs);
 
         // Set price feeds
         freshVault.setPriceFeed(currencyUSDC, address(usdcFeed));
         freshVault.setPriceFeed(currencyWBTC, address(wbtcFeed));
         freshVault.setPriceFeed(currencyWETH, address(wethFeed));
+
+        // Move time forward to perform decryption
+        vm.warp(block.timestamp + 3); 
 
         // Mint balances that are very close to target allocations
         // This will result in a small drift (< 5%) that should NOT trigger rebalancing
@@ -959,7 +1067,7 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
         weth.mint(address(freshVault), 66_666_666_666_666_666_666); // ~66.67 WETH = $200k
 
         // Call updatePricesAndCheckDrift - drift should be below 5% threshold
-        StealthfolioVault.DriftResult memory result = freshVault.updatePricesAndCheckDriftHarness();
+        StealthfolioVaultFHE.DriftResult memory result = freshVault.updatePricesAndCheckDriftHarness();
 
         // Assert: shouldRebalance should be false when drift is below minDriftBps threshold
         assertFalse(result.shouldRebalance, "shouldRebalance should be false when drift is below threshold");
@@ -973,7 +1081,7 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
     }
 
     function test_updatePricesAndCheckDrift_returnsResult() public {
-        StealthfolioVault.DriftResult memory result =
+        StealthfolioVaultFHE.DriftResult memory result =
             vault.updatePricesAndCheckDriftHarness();
 
         // After first call with non-zero portfolio, we expect:
@@ -1006,17 +1114,19 @@ contract StealthfolioVaultExecutorTest is Test, Deployers {
 
         // strategyState should be in sync with result
         if (result.shouldRebalance) {
-            (uint16 minDriftBps,,) = vault.strategyConfig(); 
+            (euint32 encryptedMinDriftBps, euint32 encryptedBatchSizeBps,  euint32 encryptedMinDriftCheckInterval, bool enabled) = vault.encryptedStrategyConfig(); 
             assertEq(
                 Currency.unwrap(targetAsset),
                 Currency.unwrap(result.targetAsset),
                 "state targetAsset should match result"
             );
-            assertEq(
-                lastDriftBps >= minDriftBps,
-                true,
-                "drift bps should exceed threshold when rebalancing"
-            );
+
+
+            (uint32 minDriftBps, bool minDriftBpsIsDecrypt) = FHE.getDecryptResultSafe(encryptedMinDriftBps);
+            
+            assertTrue(minDriftBpsIsDecrypt, "Not finished decryption"); 
+
+            assertEq( uint32(lastDriftBps) >= minDriftBps, true, "drift bps should exceed threshold when rebalancing");
         }
 
         console.log("Should Rebalance:", result.shouldRebalance); 

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+// OpenZeppelin imports
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+
+// Uniswap v4 Imports
 import {TickMath} from "v4-core/libraries/TickMath.sol";
 import {IUnlockCallback} from "v4-core/interfaces/callback/IUnlockCallback.sol";
-
 import {IPoolManager} from "v4-core/interfaces/IPoolManager.sol";
 import {IHooks} from "v4-core/interfaces/IHooks.sol";
 import {PoolKey} from "v4-core/types/PoolKey.sol";
@@ -15,23 +17,40 @@ import {SwapParams} from "v4-core/types/PoolOperation.sol";
 import {Currency, CurrencyLibrary} from "v4-core/types/Currency.sol";
 import {BalanceDelta} from "v4-core/types/BalanceDelta.sol";
 
+// Chainlink Imports
 import {MockV3Aggregator} from "@chainlink/local/src/data-feeds/MockV3Aggregator.sol";
-import {StealthfolioHook} from "./hooks/StealthfolioHook.sol";
+
+// Hook Imports
+import {StealthfolioFHEHook} from "./hooks/StealthfolioFHEHook.sol";
+
+//Fhenix Imports
+import {FHE,
+    InEuint128,
+    InEuint256,
+    InEuint32,
+    InEuint16,
+    euint16,
+    euint128,
+    euint256,
+    euint32} from "@fhenixprotocol/cofhe-contracts/FHE.sol";
 
 // import "forge-std/console.sol";
 
-contract StealthfolioVault is Ownable , IUnlockCallback {
+contract StealthfolioVaultFHE is Ownable , IUnlockCallback {
     IPoolManager public immutable manager;
-    StealthfolioHook public immutable hook;
+    StealthfolioFHEHook public immutable hook;
 
     using CurrencyLibrary for Currency;
+    using FHE for uint256; 
 
     // ========= Strategy config/state (moved from hook) =========
 
-    struct StrategyConfig {
-        uint16 minDriftBps; // minimum drift in bps before rebalancing
-        uint16 batchSizeBps; // per-batch fraction of deviation (bps)
-        uint32 minDriftCheckInterval; // min blocks between drift checks
+    
+    struct EncryptedStrategyConfig {
+        euint32 encryptedMinDriftBps; // minimum drift in bps before rebalancing
+        euint32 encryptedBatchSizeBps; // per-batch fraction of deviation (bps)
+        euint32 encryptedMinDriftCheckInterval; // per-batch fraction of deviation (bps)
+        bool enabled;
     }
 
     struct StrategyState {
@@ -48,22 +67,34 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
     }
 
 
-    StrategyConfig public strategyConfig;
+    EncryptedStrategyConfig public encryptedStrategyConfig;
     StrategyState public strategyState;
 
     // Portfolio / oracle config owned by the vault
     Currency public baseAsset; // e.g. USDC / USDT
     Currency[] public portfolioAssets; // e.g. [WBTC, WETH, USDC]
-    mapping(Currency => uint16) public targetAllocBps; // Currency -> allocation BPS
+
+    // Encrypted Target allocation
+    mapping(Currency => euint16) public encryptedTargetAllocBps; // Currency -> allocation BPS
+    euint16 public encryptedTotalAllocBps; // To store vault allocation 
+    euint16 public zeroFHE; 
+
+
+
     mapping(Currency => uint256) public lastPriceInBase; // 1e18 scaled
     mapping(Currency => MockV3Aggregator) public priceFeeds;
 
     constructor(
         IPoolManager _manager,
-        StealthfolioHook _hook
+        StealthfolioFHEHook _hook
     ) Ownable(msg.sender){
         manager = _manager;
         hook = _hook;
+
+        // Initialize zeroFHE value
+        zeroFHE = FHE.asEuint16(0);
+        FHE.allowThis(zeroFHE);
+
     }
 
     // ======================
@@ -97,23 +128,36 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
     // Admin: strategy & portfolio
     // ======================
 
-    function configureStrategy(
-        uint16 _minDriftBps,
-        uint16 _batchSizeBps,
-        uint32 _minDriftCheckInterval
+    function configureEncryptedStrategy(
+        InEuint32 calldata _encMinDriftBps,
+        InEuint32 calldata  _encBatchSizeBps,
+        InEuint32 calldata _encMinDriftCheckInterval
     ) external onlyOwner {
-        require(_batchSizeBps > 0 && _batchSizeBps <= 10_000, "INVALID_BATCH_BPS");
+        euint32 minDriftHandle   = FHE.asEuint32(_encMinDriftBps);
+        euint32 batchSizeHandle  = FHE.asEuint32(_encBatchSizeBps);
+        euint32 intervalHandle   = FHE.asEuint32(_encMinDriftCheckInterval);
+        
         // Prevent reconfiguration during active rebalance to avoid breaking in-progress operations
         (bool pendingRebalance, , , , ) = hook.rebalanceState();
         require(!pendingRebalance, "REBALANCE_IN_PROGRESS");
 
         baseAsset = hook.baseAsset();
 
-        strategyConfig = StrategyConfig({
-            minDriftBps: _minDriftBps,
-            batchSizeBps: _batchSizeBps,
-            minDriftCheckInterval: _minDriftCheckInterval
+        encryptedStrategyConfig = EncryptedStrategyConfig({
+            encryptedMinDriftBps: minDriftHandle,
+            encryptedBatchSizeBps: batchSizeHandle,
+            encryptedMinDriftCheckInterval: intervalHandle,
+            enabled: true
         });
+
+        FHE.allowThis(minDriftHandle);
+        FHE.allowThis(batchSizeHandle);
+        FHE.allowThis(intervalHandle);
+
+        // Call offchain to decrypt 
+        FHE.decrypt(minDriftHandle);
+        FHE.decrypt(batchSizeHandle);
+        FHE.decrypt(intervalHandle);
 
         // Reset state when reconfiguring strategy parameters
         // This allows immediate drift checks (lastDriftCheckBlock = 0) and clears old drift data
@@ -124,34 +168,46 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
         });
     }
 
-    function setPortfolioTargets(
+    function setEncryptedPortfolioTargets(
         Currency[] calldata assets,
-        uint16[] calldata bps
+        InEuint16[] calldata encryptedBpsInputs
     ) external onlyOwner {
-        require(assets.length == bps.length, "ASSETS_BPS_LEN");
+        require(assets.length == encryptedBpsInputs.length, "ASSETS_BPS_LEN");
         require(Currency.unwrap(baseAsset) != address(0), "BASE_ZERO");
-        require(assets.length > 0, "NO_ASSETS"); 
+        require(assets.length > 0, "NO_ASSETS");
 
         delete portfolioAssets;
 
-        uint16 total;
+        encryptedTotalAllocBps = zeroFHE; 
         bool baseSeen = false;
 
         for (uint256 i = 0; i < assets.length; i++) {
-            require(Currency.unwrap(assets[i]) != address(0), "ASSET_ZERO");
-            require(bps[i] > 0, "BPS_ZERO");
+            Currency temp_asset = assets[i];
 
-            portfolioAssets.push(assets[i]);
-            targetAllocBps[assets[i]] = bps[i];
-            total += bps[i];
-
-            if (assets[i] == baseAsset) {
+             if (temp_asset == baseAsset) {
                 baseSeen = true;
             }
+
+            require(Currency.unwrap(temp_asset) != address(0), "ASSET_ZERO");
+
+            euint16 encryptedBps = FHE.asEuint16(encryptedBpsInputs[i]);
+
+            portfolioAssets.push(temp_asset);
+            encryptedTargetAllocBps[temp_asset] = encryptedBps;
+
+            FHE.allowThis(encryptedBps);
+            FHE.decrypt(encryptedBps); 
+            encryptedTotalAllocBps = FHE.add(encryptedTotalAllocBps, encryptedBps);
+
         }
 
-        require(total == 10_000, "TOTAL_BPS_NEQ_100");
         require(baseSeen, "BASE_NOT_IN_PORTFOLIO");
+
+        // store encrypted sum
+        FHE.allowThis(encryptedTotalAllocBps);
+        //kick off decryption 
+        FHE.decrypt(encryptedTotalAllocBps); 
+
     }
 
     function setPriceFeed(Currency asset, address feed) external onlyOwner {
@@ -247,6 +303,16 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
         }
     }
 
+    function _ensureEncryptedAllocValid() view internal {
+
+        (uint16 decryptedTotalAllocBps, bool decryptedTotalAllocBpsIsDecrypt) =
+            FHE.getDecryptResultSafe(encryptedTotalAllocBps);
+
+        require(decryptedTotalAllocBpsIsDecrypt, "ALLOC_SUM_NOT_DECRYPTED");
+        require(decryptedTotalAllocBps == 10_000, "TOTAL_BPS_NEQ_100");
+
+    }
+
     /**
      * @notice Finds the asset with maximum deviation from target allocation.
      */
@@ -255,14 +321,26 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
         view
         returns (Currency maxAsset, uint256 maxAbsDev)
     {
+        _ensureEncryptedAllocValid(); 
         maxAsset = Currency.wrap(address(0));
         
         for (uint256 i = 0; i < portfolioAssets.length; i++) {
             Currency asset = portfolioAssets[i];
-            if (asset == baseAsset) continue;
+            if (asset == baseAsset) {
+                continue; 
+            }
 
-            uint16 tBps = targetAllocBps[asset];
-            if (tBps == 0) continue;
+            euint16 encryptedTbps = encryptedTargetAllocBps[asset];
+
+            (uint16 tBps, bool tBpsIsDecrypt ) = FHE.getDecryptResultSafe(encryptedTbps);
+
+            if (!tBpsIsDecrypt){
+                revert('TARGET_BPS_NOT_DECRYPTED'); 
+            }
+
+            if (tBps == 0) {
+                continue; 
+            }
 
             uint256 targetValue = (totalValue * tBps) / 10_000;
             int256 dev = int256(targetValue) - int256(values[i]);
@@ -306,19 +384,44 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
         internal
         returns (DriftResult memory result)
     {
-        StrategyConfig memory cfg = strategyConfig;
+        EncryptedStrategyConfig memory encryptedCfg = encryptedStrategyConfig;
         StrategyState storage st = strategyState;
+
+        if (!encryptedCfg.enabled) {
+            revert("ENCRYPTED_STRATEGY_NOT_SET");
+        }
+
+        // Retrieve decrypted strategy config
+        (uint32 minDriftBpsDecrypted, bool minDriftBpsIsDecrypt) =
+        FHE.getDecryptResultSafe(
+            encryptedStrategyConfig.encryptedMinDriftBps
+        );
+
+        (uint32 batchSizeBpsDecrypted, bool batchSizeBpsIsDecrypt) =
+            FHE.getDecryptResultSafe(
+                encryptedStrategyConfig.encryptedBatchSizeBps
+            );
+
+        (uint32 minDriftCheckIntervalDecrypted, bool minDriftCheckIntervalIsDecrypt) =
+            FHE.getDecryptResultSafe(
+                encryptedStrategyConfig.encryptedMinDriftCheckInterval
+            );
+
+        if (!minDriftBpsIsDecrypt || !batchSizeBpsIsDecrypt ||!minDriftCheckIntervalIsDecrypt) {
+            revert("ENCRYPTED_STRATEGY_NOT_DECRYPTED");
+        }
 
         require(Currency.unwrap(baseAsset) != address(0), "NO_BASE");
 
         // Throttle drift checks to avoid spam
         if (st.lastDriftCheckBlock != 0) {
             require(
-                block.number >= st.lastDriftCheckBlock + cfg.minDriftCheckInterval,
+                block.number >= st.lastDriftCheckBlock + minDriftCheckIntervalDecrypted,
                 "DRIFT_CHECK_TOO_SOON"
             );
         }
         st.lastDriftCheckBlock = uint32(block.number);
+
 
         (uint256 totalValue, uint256[] memory values) = _updatePrices();
 
@@ -336,13 +439,13 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
         st.lastDriftBps = driftBps;
         st.targetAsset = maxAsset;
 
-        if (driftBps < cfg.minDriftBps) {
+        if (driftBps < minDriftBpsDecrypted) {
             result.targetAsset = maxAsset;
             return result; // shouldRebalance = false
         }
 
         // Per-batch value in base terms
-        uint256 perBatchValue = (maxAbsDev * cfg.batchSizeBps) / 10_000;
+        uint256 perBatchValue = (maxAbsDev * batchSizeBpsDecrypted) / 10_000;
         if (perBatchValue == 0) {
             perBatchValue = maxAbsDev;
         }
@@ -401,7 +504,7 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
         view
         returns (BatchParams memory params)
     {
-        StrategyConfig memory cfg = strategyConfig;
+        EncryptedStrategyConfig memory encryptedCfg = encryptedStrategyConfig;
         StrategyState memory st = strategyState;
 
         Currency asset = st.targetAsset;
@@ -414,7 +517,14 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
         (uint256 totalValue, uint256 assetValue) = _computePortfolioValue(asset);
         require(totalValue > 0, "ZERO_TOTAL_VALUE");
 
-        uint16 tBps = targetAllocBps[asset];
+         euint16 encryptedTbps = encryptedTargetAllocBps[asset];
+
+        (uint16 tBps, bool tBpsIsDecrypt ) = FHE.getDecryptResultSafe(encryptedTbps);
+
+        if (!tBpsIsDecrypt){
+                revert('TARGET_BPS_NOT_DECRYPTED'); 
+        }
+
         uint256 targetValue = (totalValue * tBps) / 10_000;
         int256 dev = int256(targetValue) - int256(assetValue);
         uint256 absDev = _abs(dev);
@@ -424,7 +534,14 @@ contract StealthfolioVault is Ownable , IUnlockCallback {
         }
 
         // per-batch value
-        uint256 batchValue = (absDev * cfg.batchSizeBps) / 10_000;
+        (uint32 batchSizeBpsDecrypted, bool batchSizeBpsIsDecrypt) =
+            FHE.getDecryptResultSafe(encryptedCfg.encryptedBatchSizeBps);
+        
+        if (!batchSizeBpsIsDecrypt) {
+            revert('ENCRYPTED_BPS_NOT_DECRYPTED');
+        }
+
+        uint256 batchValue = (absDev * batchSizeBpsDecrypted) / 10_000;
         if (batchValue == 0 || batchValue > absDev) {
             batchValue = absDev;
         }

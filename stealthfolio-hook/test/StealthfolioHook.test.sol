@@ -120,8 +120,7 @@ contract StealthfolioTest is Test, Deployers {
             address(vault),
             currencyUSDC,
             10, // rebalanceCooldown: 10 blocks
-            100, // rebalanceMaxDuration: 100 blocks
-            1e18 // maxExternalSwapAmount: 1e18
+            100 // rebalanceMaxDuration: 100 blocks
         );
         
         // Mint tokens to vault
@@ -778,6 +777,10 @@ contract StealthfolioTest is Test, Deployers {
 
     // Toxic Flow Guard
     function testToxicFlowGuard_BlocksTooManySameDirectionLargeTrades() public {
+
+        // Act: call rebalanceStep from the vault owner (this test contract)
+        vault.rebalanceStep();
+        
         // Configure toxic flow for WETH/USDC
         uint32 windowBlocks = 20;
         uint8 maxSameDirLargeTrades = 2;
