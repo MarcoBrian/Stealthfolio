@@ -391,6 +391,321 @@ contract StealthfolioFHEHookTest is Test, CoFheTest, Deployers {
         vm.warp(block.timestamp + 10);
     }
 
+    // ======= Test Hook <-> Vault Interaction ===================
+    function testRebalanceStep_StartsRebalanceAndExecutesFirstBatch() public {
+        // Arrange: ensure there is significant drift by changing WBTC price
+        // Original price in setUp is 100,000; cut it in half to create underweight WBTC
+        wbtcFeed.updateAnswer(50_000e8);
+
+        // Rebalance state should be idle before calling vault.rebalanceStep
+        (
+            bool pendingBefore,
+            uint32 nextBatchBlockBefore,
+            uint32 batchesRemainingBefore,
+            uint256 lastRebalanceBlockBefore,
+            Currency targetAssetBefore
+        ) = hook.rebalanceState();
+
+        assertFalse(pendingBefore, "rebalance should not be pending before");
+        assertEq(batchesRemainingBefore, 0, "no batches should be scheduled before");
+        assertEq(Currency.unwrap(targetAssetBefore), address(0), "no target asset before");
+        assertEq(nextBatchBlockBefore, 0, "nextBatchBlock should be zero before");
+        assertEq(lastRebalanceBlockBefore, 0, "lastRebalanceBlock should be zero before");
+
+        // Capture vault balances before rebalance step
+        uint256 usdcBefore = usdc.balanceOf(address(vault));
+        uint256 wbtcBefore = wbtc.balanceOf(address(vault));
+        uint256 wethBefore = weth.balanceOf(address(vault));
+
+        console.log("Vault balances before rebalance:");
+        console.log("USDC:", usdcBefore);
+        console.log("WBTC:", wbtcBefore);
+        console.log("WETH:", wethBefore);
+
+        // Act: call rebalanceStep from the vault owner (this test contract)
+        vault.rebalanceStep();
+
+        // Assert: hook rebalance state reflects that a rebalance window started
+        (
+            bool pending,
+            uint32 nextBatchBlock,
+            uint32 batchesRemaining,
+            uint256 lastRebalanceBlock,
+            Currency hookTargetAsset
+        ) = hook.rebalanceState();
+
+        console.log("Hook rebalance state after first rebalanceStep:");
+        console.log("pending:", pending);
+        console.log("nextBatchBlock:", nextBatchBlock);
+        console.log("batchesRemaining:", batchesRemaining);
+        console.log("lastRebalanceBlock:", lastRebalanceBlock);
+        console.log(
+            "hook targetAsset:",
+            Currency.unwrap(hookTargetAsset)
+        );
+
+        // Either we have an ongoing rebalance (pending) or a completed one (lastRebalanceBlock > 0)
+        assertTrue(
+            pending || lastRebalanceBlock > 0,
+            "rebalance should have started or completed at least one batch"
+        );
+
+        // Vault strategy state should have a non-zero target asset when drift was detected
+        (uint16 lastDriftBps,, Currency vaultTargetAsset) = vault.strategyState();
+        console.log("vault lastDriftBps:", lastDriftBps);
+        console.log("vault targetAsset:", Currency.unwrap(vaultTargetAsset));
+
+        assertGt(lastDriftBps, 0, "drift bps should be > 0 after rebalance step");
+        assertTrue(
+            vaultTargetAsset == currencyWBTC || vaultTargetAsset == currencyWETH,
+            "target asset should be one of the strategy assets"
+        );
+
+        // Capture vault balances after rebalance step
+        uint256 usdcAfter = usdc.balanceOf(address(vault));
+        uint256 wbtcAfter = wbtc.balanceOf(address(vault));
+        uint256 wethAfter = weth.balanceOf(address(vault));
+
+        console.log("Vault balances after rebalance:");
+        console.log("USDC:", usdcAfter);
+        console.log("WBTC:", wbtcAfter);
+        console.log("WETH:", wethAfter);
+
+        // We expect at least base asset and the target asset balances to change due to the swap
+        if (vaultTargetAsset == currencyWBTC) {
+            assertTrue(
+                usdcAfter != usdcBefore || wbtcAfter != wbtcBefore,
+                "USDC or WBTC balance should change for WBTC target"
+            );
+        } else if (vaultTargetAsset == currencyWETH) {
+            assertTrue(
+                usdcAfter != usdcBefore || wethAfter != wethBefore,
+                "USDC or WETH balance should change for WETH target"
+            );
+        }
+    }
+
+    function testRebalanceStep_CompletesAllBatches() public {
+        // Simulate price change on BTC to 50k USD 
+        wbtcFeed.updateAnswer(50_000e8);
+
+        // Capture initial balances
+        uint256 usdcStart = usdc.balanceOf(address(vault));
+        uint256 wbtcStart = wbtc.balanceOf(address(vault));
+        uint256 wethStart = weth.balanceOf(address(vault));
+
+        console.log("Vault balances at start of full rebalance:");
+        console.log("USDC:", usdcStart);
+        console.log("WBTC:", wbtcStart);
+        console.log("WETH:", wethStart);
+
+        // First rebalance step to start the window and execute first batch
+        vault.rebalanceStep();
+
+        // Record which asset the strategy decided to target
+        (uint16 initialDriftBps, , Currency strategyTargetAsset) = vault.strategyState();
+
+        (
+            bool pending,
+            uint32 nextBatchBlock,
+            uint32 batchesRemaining,
+            uint256 lastRebalanceBlock,
+            Currency hookTargetAsset
+        ) = hook.rebalanceState();
+
+        console.log("Initial drift detected:");
+        console.log("targetAsset:", MockERC20(Currency.unwrap(strategyTargetAsset)).symbol());
+        console.log("initialDriftBps:", initialDriftBps);
+        console.log("batchesRemaining after first step:", batchesRemaining);
+
+        // Calculate and log initial portfolio state for debugging
+        (uint256 totalValueStart, uint256[] memory valuesStart) = vault.updatePricesHarness();
+
+        euint16 encryptedTbps =  vault.encryptedTargetAllocBps(strategyTargetAsset); 
+        (uint16 tBps, bool tBpsIsDecrypt ) = FHE.getDecryptResultSafe(encryptedTbps);
+
+        
+        uint256 targetValueStart = (totalValueStart * tBps) / 10_000;
+        uint256 assetValueStart;
+        for (uint256 i = 0; i < 3; i++) {
+            if (vault.portfolioAssets(i) == strategyTargetAsset) {
+                assetValueStart = valuesStart[i];
+                break;
+            }
+        }
+        int256 initialDev = int256(targetValueStart) - int256(assetValueStart);
+        uint256 absDevStart = initialDev > 0 ? uint256(initialDev) : uint256(-initialDev);
+        
+        console.log("Initial portfolio analysis:");
+        console.log("totalValue (1e18):", totalValueStart);
+        console.log("targetValue for asset (1e18):", targetValueStart);
+        console.log("assetValue (1e18):", assetValueStart);
+        console.log("absDev (1e18):", absDevStart);
+        
+        (euint32 encryptedMinDriftBps, euint32 encryptedBatchSizeBps, euint32 encryptedMinDriftCheckInterval , bool enabled) = vault.encryptedStrategyConfig(); 
+        (uint32 batchSizeBps, bool batchSizeIsDecrypt ) = FHE.getDecryptResultSafe(encryptedBatchSizeBps);
+
+
+        uint256 expectedBatchValue = (absDevStart * batchSizeBps) / 10_000;
+        if (expectedBatchValue > absDevStart || expectedBatchValue == 0) {
+            expectedBatchValue = absDevStart;
+        }
+        console.log("expectedBatchValue per batch (1e18):", expectedBatchValue);
+        console.log("total batches:", batchesRemaining + 1);
+        
+        // For buying (dev > 0), convert to base token amount
+        if (initialDev > 0) {
+            uint256 priceBase = vault.lastPriceInBase(currencyUSDC);
+            uint256 expectedBaseAmountPerBatch = (expectedBatchValue * 1e6) / priceBase;
+            uint256 expectedTotalBaseAmount = expectedBaseAmountPerBatch * (batchesRemaining + 1);
+            console.log("expectedBaseAmount per batch (USDC raw):", expectedBaseAmountPerBatch);
+            console.log("expectedBaseAmount per batch (USDC):", expectedBaseAmountPerBatch / 1e6);
+            console.log("expectedTotalBaseAmount (all batches, USDC):", expectedTotalBaseAmount / 1e6);
+        }
+
+        // We expect a pending rebalance with at least 1 remaining batch
+        assertTrue(pending, "rebalance should be pending after first step");
+        assertGt(batchesRemaining, 0, "there should be remaining batches");
+        assertEq(lastRebalanceBlock, 0, "lastRebalanceBlock should be zero until completion");
+        assertTrue(
+            hookTargetAsset == currencyWBTC || hookTargetAsset == currencyWETH,
+            "hook targetAsset should be a strategy asset"
+        );
+
+        // Continue calling rebalanceStep until all batches are completed
+        while (true) {
+            // Move forward at least one block to satisfy both
+            // - hook's nextBatchBlock spacing
+            // - vault's minDriftCheckInterval
+
+            (euint32 encryptedMinDriftBps, euint32 encryptedBatchSizeBps, euint32 encryptedMinDriftCheckInterval , bool enabled) = vault.encryptedStrategyConfig(); 
+            (uint32 minDriftInterval, bool minDriftIsDecrypted ) = FHE.getDecryptResultSafe(encryptedMinDriftBps);
+            vm.roll(block.number + minDriftInterval + 1 );
+
+            vault.rebalanceStep();
+
+            (
+                bool p,
+                uint32 nbb,
+                uint32 br,
+                uint256 lrb,
+                Currency ta
+            ) = hook.rebalanceState();
+
+            pending = p;
+            nextBatchBlock = nbb;
+            batchesRemaining = br;
+            lastRebalanceBlock = lrb;
+            hookTargetAsset = ta;
+
+            if (!pending) {
+                break;
+            }
+        }
+
+        console.log("Hook rebalance state after completing all batches:");
+        console.log("pending:", pending);
+        console.log("nextBatchBlock:", nextBatchBlock);
+        console.log("batchesRemaining:", batchesRemaining);
+        console.log("lastRebalanceBlock:", lastRebalanceBlock);
+        console.log("hook targetAsset:", Currency.unwrap(hookTargetAsset));
+
+        // At the end of full rebalance:
+        assertFalse(pending, "rebalance should no longer be pending");
+        assertEq(batchesRemaining, 0, "no batches should remain");
+        assertEq(
+            Currency.unwrap(hookTargetAsset),
+            address(0),
+            "hook targetAsset should be cleared"
+        );
+        assertGt(lastRebalanceBlock, 0, "lastRebalanceBlock should be set on completion");
+
+        // Vault balances should have changed compared to start
+        uint256 usdcEnd = usdc.balanceOf(address(vault));
+        uint256 wbtcEnd = wbtc.balanceOf(address(vault));
+        uint256 wethEnd = weth.balanceOf(address(vault));
+
+        console.log("Vault balances after full rebalance:");
+        console.log("USDC:", usdcEnd);
+        console.log("WBTC:", wbtcEnd);
+        console.log("WETH:", wethEnd);
+
+        // Calculate actual changes
+        int256 usdcChange = int256(usdcEnd) - int256(usdcStart);
+        int256 wbtcChange = int256(wbtcEnd) - int256(wbtcStart);
+        int256 wethChange = int256(wethEnd) - int256(wethStart);
+
+        console.log("Balance changes (raw):");
+        console.log("USDC change:", usdcChange);
+        console.log("WBTC change:", wbtcChange);
+        console.log("WETH change:", wethChange);
+        
+        // Compare actual vs expected
+        if (strategyTargetAsset == currencyWETH && wethChange > 0) {
+            console.log("Actual WETH received:", uint256(wethChange) / 1e18);
+        } else if (strategyTargetAsset == currencyWBTC && wbtcChange > 0) {
+            console.log("Actual WBTC received:", uint256(wbtcChange) / 1e8);
+        }
+        if (usdcChange < 0) {
+            console.log("Actual USDC spent:", uint256(-usdcChange) / 1e6);
+        }
+
+
+
+
+        assertTrue(
+            usdcEnd != usdcStart || wbtcEnd != wbtcStart || wethEnd != wethStart,
+            "at least one asset balance should change after full rebalance"
+        );
+
+        // ==== Verify drift math: target asset allocation should be within minDriftBps ====
+
+        // Pull strategy config and target allocation for the chosen asset
+
+        (encryptedMinDriftBps, encryptedBatchSizeBps, encryptedMinDriftCheckInterval , enabled) = vault.encryptedStrategyConfig(); 
+        (uint32 minDriftBps,  ) = FHE.getDecryptResultSafe(encryptedMinDriftBps);
+
+
+        encryptedTbps =  vault.encryptedTargetAllocBps(strategyTargetAsset); 
+        (tBps,  tBpsIsDecrypt ) = FHE.getDecryptResultSafe(encryptedTbps);
+
+
+        // Compute portfolio total value and target-asset value using vault's cached prices
+        Currency[3] memory assetsArr = [currencyUSDC, currencyWBTC, currencyWETH];
+
+        uint256 totalValue;
+        uint256 assetValue;
+
+        for (uint256 i = 0; i < assetsArr.length; i++) {
+            Currency a = assetsArr[i];
+            uint256 price = vault.lastPriceInBase(a);
+            if (price == 0) continue;
+
+            address token = Currency.unwrap(a);
+            uint256 bal = IERC20(token).balanceOf(address(vault));
+
+            // Normalize balance using vault's internal function
+            uint256 normalizedBal = vault.normalizeBalanceHarness(token, bal);
+
+            uint256 v = (normalizedBal * price) / 1e18;
+            totalValue += v;
+            if (a == strategyTargetAsset) {
+                assetValue = v;
+            }
+        }
+
+        // Compute post-rebalance drift of the target asset in BPS
+        uint256 targetValue = (totalValue * tBps) / 10_000;
+        uint256 absDev = targetValue > assetValue
+            ? targetValue - assetValue
+            : assetValue - targetValue;
+        uint16 driftBps = uint16((absDev * 10_000) / totalValue);
+
+        console.log("post-rebalance driftBps for target asset:", driftBps);
+        console.log("minDriftBps:", minDriftBps);
+
+    }
+
     // ======= Test Hook BeforeSwap functionalities with Fhenix encrypted guardrails ==============
 
     // Test encrypted Vol Bands
@@ -745,5 +1060,197 @@ contract StealthfolioFHEHookTest is Test, CoFheTest, Deployers {
 
         vm.expectRevert();
         swapRouter.swap(wethPoolKey, paramsThird, settings, bytes(""));
+    }
+
+
+    function testToxicFlowGuard_ResetsAfterWindowAndAllowsAlternatingDirections() public {
+        uint32 windowBlocks = 5;
+        uint8 maxSameDirLargeTrades = 2;
+        uint256 minLargeTradeAmount = 1e18;
+
+        // Encrypt thresholds using CoFheTest helpers
+
+        InEuint32 memory encWindowBlocks = createInEuint32(
+            windowBlocks,
+            address(this)
+        );
+
+        InEuint32 memory encMaxSameDir = createInEuint32(
+            maxSameDirLargeTrades,
+            address(this)
+        );
+
+        InEuint256 memory encMinLarge = createInEuint256(
+            minLargeTradeAmount,
+            address(this)
+        );
+
+        // Call encrypted setter on the hook
+        hook.setEncryptedToxicFlowConfig(
+            wethPoolKey,
+            encWindowBlocks,
+            encMaxSameDir,
+            encMinLarge
+        );
+
+        // We'll use direction toggling by referencing poolKey.currency0
+        bool zeroForOne = (wethPoolKey.currency0 == currencyWETH);
+        bool oneForZero = !zeroForOne;
+        uint256 largeAmountIn = 2e18;
+
+        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
+
+        // --- Part 1: Alternating directions should never exceed sameDirCount ---
+        // Trade 1: direction A
+        weth.mint(address(this), largeAmountIn);
+        weth.approve(address(manager), largeAmountIn);
+        SwapParams memory paramsA1 = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(largeAmountIn),
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+        swapRouter.swap(wethPoolKey, paramsA1, settings, bytes(""));
+
+        // Trade 2: direction B (opposite)
+        weth.mint(address(this), largeAmountIn);
+        weth.approve(address(manager), largeAmountIn);
+        SwapParams memory paramsB1 = SwapParams({
+            zeroForOne: oneForZero,
+            amountSpecified: -int256(largeAmountIn),
+            sqrtPriceLimitX96: oneForZero
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+        swapRouter.swap(wethPoolKey, paramsB1, settings, bytes(""));
+
+        // Trade 3: direction A again, still within window
+        weth.mint(address(this), largeAmountIn);
+        weth.approve(address(manager), largeAmountIn);
+        SwapParams memory paramsA2 = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(largeAmountIn),
+            sqrtPriceLimitX96: zeroForOne
+                ? TickMath.MIN_SQRT_PRICE + 1
+                : TickMath.MAX_SQRT_PRICE - 1
+        });
+        // Should still pass because streak keeps resetting
+        swapRouter.swap(wethPoolKey, paramsA2, settings, bytes(""));
+
+        // --- Part 2: window reset ---
+        // Move beyond windowBlocks to force reset
+        vm.roll(block.number + windowBlocks + 1);
+
+        // New streak: 2 trades in same direction should pass
+        for (uint256 i = 0; i < 2; i++) {
+            weth.mint(address(this), largeAmountIn);
+            weth.approve(address(manager), largeAmountIn);
+            SwapParams memory params = SwapParams({
+                zeroForOne: zeroForOne,
+                amountSpecified: -int256(largeAmountIn),
+                sqrtPriceLimitX96: zeroForOne
+                    ? TickMath.MIN_SQRT_PRICE + 1
+                    : TickMath.MAX_SQRT_PRICE - 1
+            });
+            swapRouter.swap(wethPoolKey, params, settings, bytes(""));
+        }
+    }
+
+
+
+
+    // ======= Test Pools Swap Functionality ==============
+    function test_WETH_USDC_Swap() public {
+        // Swap WETH for USDC in the WETH/USDC pool
+
+        // Arrange: mint WETH to this test contract and approve the manager
+        uint256 wethAmountIn = 1e18; 
+        weth.mint(address(this), wethAmountIn);
+        weth.approve(address(manager), wethAmountIn);
+
+        // Determine swap direction: zeroForOne = true means token0 -> token1
+        bool zeroForOne = (wethPoolKey.currency0 == currencyWETH);
+
+        // Prepare swap parameters: exact input swap
+        SwapParams memory params = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(wethAmountIn),
+            sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+        });
+
+        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
+
+        // Record balances before swap
+        uint256 wethBefore = weth.balanceOf(address(this));
+        uint256 usdcBefore = usdc.balanceOf(address(this));
+        console.log("weth Before:", wethBefore); 
+        console.log("usdc Before:", usdcBefore); 
+
+        // Act: perform the swap through the swapRouter
+        swapRouter.swap(wethPoolKey, params, settings, bytes(""));
+
+        // Assert: balances moved in expected direction
+        uint256 wethAfter = weth.balanceOf(address(this));
+        uint256 usdcAfter = usdc.balanceOf(address(this));
+
+        console.log("weth After:",wethAfter);
+        console.log("usdc After:",usdcAfter);
+
+
+        // We should have spent some WBTC and received some USDC
+        assertLt(wethAfter, wethBefore);
+        assertGt(usdcAfter, usdcBefore);
+    }
+
+    function test_WBTC_USDC_Swap() public {
+        // Swap WBTC for USDC in the WBTC/USDC pool
+
+        // Arrange: mint WBTC to this test contract and approve the manager
+        uint256 wbtcAmountIn = 0.1e8; // 0.1 WBTC (8 decimals)
+        wbtc.mint(address(this), wbtcAmountIn);
+        wbtc.approve(address(manager), wbtcAmountIn);
+
+        // Determine swap direction: zeroForOne = true means token0 -> token1
+        bool zeroForOne = (wbtcPoolKey.currency0 == currencyWBTC);
+
+        // Prepare swap parameters: exact input swap
+        SwapParams memory params = SwapParams({
+            zeroForOne: zeroForOne,
+            amountSpecified: -int256(wbtcAmountIn),
+            sqrtPriceLimitX96: zeroForOne ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1
+        });
+
+        PoolSwapTest.TestSettings memory settings = PoolSwapTest.TestSettings({
+            takeClaims: false,
+            settleUsingBurn: false
+        });
+
+        // Record balances before swap
+        uint256 wbtcBefore = wbtc.balanceOf(address(this));
+        uint256 usdcBefore = usdc.balanceOf(address(this));
+        console.log("wbtc Before:", wbtcBefore); 
+        console.log("usdc Before:", usdcBefore); 
+
+        // Act: perform the swap through the swapRouter
+        swapRouter.swap(wbtcPoolKey, params, settings, bytes(""));
+
+        // Assert: balances moved in expected direction
+        uint256 wbtcAfter = wbtc.balanceOf(address(this));
+        uint256 usdcAfter = usdc.balanceOf(address(this));
+
+        console.log("wbtc After:",wbtcAfter);
+        console.log("usdc After:",usdcAfter);
+
+
+        // We should have spent some WBTC and received some USDC
+        assertLt(wbtcAfter, wbtcBefore);
+        assertGt(usdcAfter, usdcBefore);
     }
 }

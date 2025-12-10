@@ -1,6 +1,6 @@
 # Stealthfolio 
 
-Stealthfolio is a Uniswap v4 hook that enables confidential, multi-asset portfolio rebalancing using Fhenix Fully Homomorphic Encryption (FHE). It is a Uniswap v4 rebalancing hook that transforms a v4 pool into a strategy-aware, protected execution lane for portfolio management.
+Stealthfolio is a Uniswap v4 hook + vault system that enables confidential, multi-asset portfolio rebalancing using Fhenix Fully Homomorphic Encryption (FHE). It is a Uniswap v4 rebalancing hook that transforms a v4 pool into a strategy-aware, protected execution lane for portfolio management.
 It continuously monitors swap flow, detects allocation drift, plans rebalancing batches, and enforces execution guardrails. 
 
 <img src="./assets/banner.png" alt="Stealthfolio Banner" width="800">
@@ -325,4 +325,6 @@ sequenceDiagram
 
 ## Test Coverage
 
+Run coverage test
+`forge coverage --report lcov --ir-minimum && genhtml lcov.info --output-dir coverage_report`
 
