@@ -3,69 +3,72 @@
 Stealthfolio is a Uniswap v4 hook that enables confidential, multi-asset portfolio rebalancing using Fhenix Fully Homomorphic Encryption (FHE). It is a Uniswap v4 rebalancing hook that transforms a v4 pool into a strategy-aware, protected execution lane for portfolio management.
 It continuously monitors swap flow, detects allocation drift, plans rebalancing batches, and enforces execution guardrails. 
 
+<img src="./assets/banner.png" alt="Stealthfolio Banner" width="800">
+
+## Problem to Solve
+
+Portfolio rebalancing strategies face several critical challenges when deployed on public blockchains:
+
+**Strategy Exposure**: Traditional on-chain rebalancing systems expose all strategy parameters publicly, including target allocations, drift thresholds, and batch sizes. This transparency allows competitors and attackers to:
+- Copy successful strategies
+- Predict rebalancing actions before execution
+- Front-run rebalancing trades for profit
+
+**MEV and Front-Running**: When rebalancing parameters are visible, sophisticated actors can:
+- Monitor strategy state and predict upcoming trades
+- Extract value by front-running rebalancing swaps
+- Cause slippage and increase execution costs for the strategy
+
+**Toxic Flow and Manipulation**: During rebalancing windows, malicious actors can:
+- Execute large trades in the same direction to manipulate prices
+- Create artificial volatility to trigger false rebalancing signals
+- Exploit predictable rebalancing patterns for profit
+
+**Lack of Confidential Execution**: Existing DeFi protocols require all strategy logic to be transparent, making it impossible to maintain competitive advantages or protect proprietary allocation strategies.
+
+**Multi-Asset Portfolio Management**: Managing complex multi-asset portfolios on AMMs requires:
+- Coordinated rebalancing across multiple pools
+- Protection mechanisms during execution windows
+- Efficient batch execution to minimize market impact
+
+## Solution
+
+Stealthfolio addresses these challenges by combining Uniswap v4 hooks with Fully Homomorphic Encryption (FHE) to create a confidential, protected rebalancing system:
+
+**Confidential Strategy Parameters**: All strategy parameters, including target allocations, drift thresholds, and batch sizes, are encrypted using FHE. This ensures strategy details remain private while still enabling on-chain computation.
+
+**Protected Execution Windows**: The hook enforces multiple layers of safeguards during rebalancing:
+- Volatility bands prevent trading in manipulated markets
+- Max trade guards limit individual trade sizes
+- Toxic flow detection prevents directional manipulation
+
+**MEV Resistance**: By keeping strategy parameters encrypted, the system prevents front-runners from predicting rebalancing actions. The vault can execute rebalancing trades without exposing its strategy in advance.
+
+**Multi-Batch Execution**: Large deviations are automatically split into multiple batches, minimizing market impact and reducing the risk of price manipulation.
+
+**Vault Isolation**: Funds remain in a separate vault contract, ensuring the hook never holds assets and maintaining clear separation of concerns.
+
 Stealthfolio is built in 2 parts: 
 1. Public, Protected Rebalancing Hook 
 2. Fully Private, FHE-Powered Rebalancing Hook
 
 ## Part 1 Stealthfolio - Public, Protected Rebalancing Hook 
 
-Part 1 implements the complete rebalancing system with all strategy parameters and logic publicly visible on-chain. Building this part first allows clear implementation and testing of the core logic and math before adding privacy features.
+Part 1 implements the complete rebalancing system with all strategy parameters and logic publicly visible on-chain. This version serves as the foundation, allowing clear implementation and testing of the core logic and math before adding privacy features in Part 2.
 
-### Architecture
+### Key Difference from Part 2
 
-The Part 1 implementation consists of two main contracts:
+The main difference is that all strategy parameters are stored as **public state variables** instead of encrypted values:
 
-**StealthfolioHook**: The Uniswap v4 hook that enforces execution safeguards and coordinates rebalancing windows. It intercepts swaps via `beforeSwap` and applies protection rules while allowing vault swaps during rebalance periods.
+- **Strategy parameters**: `minDriftBps`, `batchSizeBps`, `targetAllocBps` are all public
+- **Safeguard parameters**: `centerSqrtPriceX96`, `widthBps`, `maxAmount`, `windowBlocks`, etc. are all public
+- **No FHE encryption**: All values are directly readable on-chain
 
-**StealthfolioVault**: The vault contract that holds funds and executes the rebalancing strategy. It manages strategy configuration, computes drift using oracle prices, and executes rebalancing batches through the pool manager.
-
-### Strategy Configuration
-
-All strategy parameters are stored as public state variables:
-
-**Vault Strategy Configuration:**
-- Target allocations per asset (targetAllocBps) - public mapping
-- Minimum drift threshold in basis points (minDriftBps)
-- Batch size in basis points (batchSizeBps)
-- Minimum drift check interval in blocks (minDriftCheckInterval)
-
-**Hook Safeguards:**
-- Volatility band center price and width (centerSqrtPriceX96, widthBps) - blocks trades outside price bands
-- Maximum trade size limits (maxAmount) - caps individual trade sizes
-- Toxic flow detection parameters:
-  - Window length in blocks (windowBlocks)
-  - Maximum same-direction large trades (maxSameDirLargeTrades)
-  - Minimum large trade threshold (minLargeTradeAmount)
-
-### How It Works
-
-1. **Configuration**: The owner sets strategy parameters and portfolio targets. All values are stored as public state, making the strategy fully transparent.
-
-2. **Drift Detection**: The vault periodically updates prices from Chainlink oracles and computes portfolio drift. It compares current allocations against target allocations to find the asset with maximum deviation.
-
-3. **Rebalance Initiation**: When drift exceeds the minimum threshold, the vault calls `startRebalance` on the hook, opening a rebalancing window with a specified number of batches.
-
-4. **Batch Execution**: The vault computes batch swap parameters using the configured batch size, then executes swaps through the pool manager. The hook allows vault swaps while enforcing safeguards on external swaps.
-
-5. **Safeguard Enforcement**: During rebalancing, the hook enforces:
-   - Volatility bands: Blocks trades if price moves outside configured price bands
-   - Max trade guards: Limits trade sizes to configured maximums
-   - Toxic flow detection: Prevents repeated large trades in the same direction within configured windows
-
-6. **Completion**: After all batches execute, the rebalance window closes and a cooldown period begins before the next rebalance can start.
-
-### Key Features
-
-- **Public Strategy**: All parameters and allocations are visible on-chain for transparency
-- **Execution Protection**: Multiple layers of safeguards prevent manipulation and toxic flow
-- **Vault Isolation**: Funds remain in a separate vault contract; the hook never holds assets
-- **Multi-Batch Rebalancing**: Large deviations are rebalanced across multiple batches to minimize market impact
-- **Oracle Integration**: Uses Chainlink price feeds for accurate portfolio valuation
-- **Cooldown Management**: Prevents excessive rebalancing with configurable cooldown periods
+The architecture, workflow, and functionality are identical to Part 2. See Part 2 below for the complete detailed explanation of how the system works.
 
 ## Part 2 Stealthfolio - Fully Private, FHE-Powered Rebalancing Hook
 
-Part 2 implements the complete FHE-powered rebalancing system. It maintains the same architecture as Part 1 but makes all strategy parameters, computations, and decisions private using Fully Homomorphic Encryption (FHE).
+Part 2 implements the complete FHE-powered rebalancing system. It maintains the same architecture and workflow as Part 1 but makes all strategy parameters, computations, and decisions private using Fully Homomorphic Encryption (FHE). This section provides the detailed explanation of how the system works.
 
 ### Architecture
 
@@ -129,10 +132,7 @@ The system uses threshold decryption where encrypted values are decrypted off-ch
 ![HighLevel](./assets/HighLevel.png)
 
 ## Sequence Diagram
-![SequenceDiagram](./assets/SequenceDiagramv1.png)
-
-
-### Configuration Phase 
+### 1. Configuration Phase 
 
 ```mermaid
 sequenceDiagram
@@ -169,7 +169,7 @@ sequenceDiagram
     FHE-->>Hook: Decryption in progress
 ```
 
-### Drift Detection Phase
+### 2. Drift Detection Phase
 ```mermaid
 sequenceDiagram
     participant Owner
@@ -216,7 +216,7 @@ sequenceDiagram
     end
 ```
 
-### Rebalance Execution Phase
+### 3. Rebalance Execution Phase
 ```mermaid
 sequenceDiagram
     participant Vault as StealthfolioVaultFHE
@@ -293,7 +293,7 @@ sequenceDiagram
     Vault->>PoolManager: settle()
 ```
 
-### Batch Completion Phase
+### 4. Batch Completion Phase
 ```mermaid
 sequenceDiagram
     participant Vault as StealthfolioVaultFHE
@@ -322,3 +322,7 @@ sequenceDiagram
         Vault-->>Owner: Batch executed, call rebalanceStep() for next batch
     end
 ```
+
+## Test Coverage
+
+
