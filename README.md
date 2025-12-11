@@ -384,8 +384,118 @@ sequenceDiagram
 
 ## Test Coverage
 
-Run coverage test
-`forge coverage --report lcov --ir-minimum && genhtml lcov.info --output-dir coverage_report`
+### Running Coverage Tests
+
+```bash
+forge coverage --report lcov --ir-minimum && genhtml lcov.info --output-dir coverage_report
+```
 
 ![Coverage](./assets/Coverage.png)
 ![Testcases](./assets/Testcases.png)
+
+- Key functionalities tested
+- 90% test coverage
+
+## Quick Start
+
+### Prerequisites
+
+- [Foundry](https://book.getfoundry.sh/getting-started/installation) (latest version)
+- Git
+- Node.js (for frontend, if applicable)
+
+### Installation
+
+1. **Clone the repository**
+   ```bash
+   git clone <repository-url>
+   cd Stealthfolio
+   ```
+
+2. **Install dependencies**
+   ```bash
+   cd stealthfolio-hook
+   forge install
+   ```
+
+3. **Build the project**
+   ```bash
+   forge build
+   ```
+
+4. **Run tests**
+   ```bash
+   forge test
+   ```
+
+5. **Run tests with verbosity** (for detailed output)
+   ```bash
+   forge test -vvv
+   ```
+
+### Project Structure
+
+```
+Stealthfolio/
+├── assets/                    # Images and visual assets
+├── frontend/                  # Frontend landing page (React + Vite)
+├── stealthfolio-hook/        # Main Foundry project
+│   ├── src/
+│   │   ├── hooks/
+│   │   │   └── StealthfolioFHEHook.sol      # FHE-powered hook implementation
+│   │   ├── v1Stealthfolio/                   # Part 1: Public rebalancing system
+│   │   │   ├── StealthfolioHook.sol         # Public hook implementation
+│   │   │   └── StealthfolioVaultExecutor.sol # Public vault executor
+│   │   ├── StealthfolioVaultExecutorFHE.sol  # Part 2: FHE-powered vault executor
+│   │   └── utils/
+│   │       └── CalculatePrice.sol           # Price calculation utilities
+│   ├── test/
+│   │   ├── v1Stealthfolio/                   # Tests for Part 1 (public)
+│   │   │   ├── StealthfolioHook.test.sol
+│   │   │   └── StealthfolioVaultExecutor.test.sol
+│   │   ├── v2FHEStealthfolio/                # Tests for Part 2 (FHE)
+│   │   │   ├── StealthfolioFHEHook.test.sol
+│   │   │   └── StealthfolioVaultExecutorFHE.test.sol
+│   │   ├── oracle/
+│   │   │   └── MockPriceFeed.test.sol        # Mock oracle tests
+│   │   └── utils/
+│   │       └── CalculatePrice.test.sol       # Utility tests
+│   ├── lib/                   # Dependencies (installed via `forge install`)
+│   ├── script/                # Deployment scripts
+│   ├── foundry.toml           # Foundry configuration
+│   └── remappings.txt         # Solidity import remappings
+└── README.md                  # This file
+```
+
+## Dependencies
+
+### Core Dependencies
+
+- **Solidity**: `0.8.26`
+- **EVM Version**: `cancun`
+- **Foundry**: Latest version (for development, testing, and deployment)
+
+### Key Libraries
+
+- **[Uniswap v4 Core](https://github.com/Uniswap/v4-core)** - Uniswap v4 pool manager and core contracts
+- **[Uniswap v4 Periphery](https://github.com/Uniswap/v4-periphery)** - Uniswap v4 periphery contracts and utilities
+- **[Fhenix FHE Contracts](https://fhenix.io/)** - Fully Homomorphic Encryption contracts for confidential computation
+  - `@fhenixprotocol/cofhe-contracts` - FHE contract interfaces
+  - `@fhenixprotocol/cofhe-mock-contracts` - Mock FHE contracts for testing
+- **[Chainlink Contracts](https://github.com/smartcontractkit/chainlink)** - Mock Price feed oracles for portfolio valuation
+- **[OpenZeppelin Contracts](https://github.com/OpenZeppelin/openzeppelin-contracts)** - Security-focused smart contract library
+- **[Forge Std](https://github.com/foundry-rs/forge-std)** - Standard library for Foundry testing
+
+### Installation
+
+All dependencies are managed via Foundry's git submodule system. They are automatically installed when you run:
+
+```bash
+forge install
+```
+
+Dependencies are located in the `stealthfolio-hook/lib/` directory.
+
+## Resources
+- [Youtube Demo](https://youtu.be/Extc4t-mvD4?si=xcXtQTI3ltP55g8F)
+- [Canva Slides](https://www.canva.com/design/DAG6Qmoy0Xo/RmiwKo1--60D8_EoSrdygw/edit?utm_content=DAG6Qmoy0Xo&utm_campaign=designshare&utm_medium=link2&utm_source=sharebutton)
