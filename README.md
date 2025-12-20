@@ -5,6 +5,12 @@ It continuously monitors swap flow, detects allocation drift, plans rebalancing 
 
 <img src="./assets/banner.png" alt="Stealthfolio Banner" width="800">
 
+## 🏆 Top 8 Projects of Uniswap Hook Incubator Cohort 7 🏆 
+
+Presented during Demo Day UHI 7: https://www.youtube.com/watch?v=-P-bLlCtl6E
+
+​​​Judges include investors at a16z, Variant Fund, Dragonfly Capital, USV and Uniswap Foundation.
+
 ## Problem to Solve
 
 Portfolio rebalancing strategies face several critical challenges when deployed on public blockchains:
